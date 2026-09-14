@@ -25,6 +25,36 @@ enum SelfTest {
                 exit(0)
             }
         }
+        if defaults.bool(forKey: "checkUpdate") {
+            let current = defaults.string(forKey: "asVersion") ?? "1.0.0"
+            let sem = DispatchSemaphore(value: 0)
+            Task {
+                defer { sem.signal() }
+                struct GHAsset: Decodable { let name: String; let browser_download_url: String }
+                struct GHRelease: Decodable { let tag_name: String; let html_url: String; let draft: Bool; let assets: [GHAsset] }
+                let url = URL(string: "https://api.github.com/repos/dripster82/IphoneBackupExplorer/releases?per_page=30")!
+                var req = URLRequest(url: url); req.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+                do {
+                    let (data, resp) = try await URLSession.shared.data(for: req)
+                    print("HTTP \((resp as? HTTPURLResponse)?.statusCode ?? -1)")
+                    let releases = try JSONDecoder().decode([GHRelease].self, from: data)
+                    let cur = AppVersion(current)!
+                    for r in releases {
+                        let v = AppVersion(r.tag_name)
+                        print("  release \(r.tag_name) -> parsed \(v?.raw ?? "nil") channel=\(v.map { "\($0.channel)" } ?? "-") draft=\(r.draft) assets=\(r.assets.map(\.name))")
+                    }
+                    let best = releases.compactMap { r -> (AppVersion, GHRelease)? in
+                        guard !r.draft, let v = AppVersion(r.tag_name) else { return nil }; return (v, r)
+                    }.max(by: { $0.0 < $1.0 })
+                    if let best {
+                        let asset = Updater.pickDMGAsset(best.1.assets.map { ($0.name, $0.browser_download_url) })
+                        print("current=\(current) best=\(best.0.raw) newer=\(cur < best.0) dmg=\(asset?.lastPathComponent ?? "none")")
+                    } else { print("no candidate releases") }
+                } catch { print("ERROR: \(error.localizedDescription)") }
+            }
+            sem.wait()
+            exit(0)
+        }
         if let db = defaults.string(forKey: "parseContacts"), !db.isEmpty {
             do {
                 let contacts = try ContactsStore.load(from: URL(fileURLWithPath: db))

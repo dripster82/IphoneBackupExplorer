@@ -2,6 +2,7 @@ import SwiftUI
 
 struct ContentView: View {
     @EnvironmentObject var model: AppModel
+    @EnvironmentObject var updater: Updater
     @State private var columnVisibility: NavigationSplitViewVisibility = .all
 
     var body: some View {
@@ -27,7 +28,18 @@ struct ContentView: View {
             }
             .navigationSplitViewColumnWidth(min: 280, ideal: 380)
         }
-        .onAppear { model.scan() }
+        .onAppear {
+            model.scan()
+            updater.checkForUpdates()
+        }
+        .onChange(of: updater.updateAvailableVersion) { _, version in
+            // Surface a found update once per launch without nagging on later re-checks.
+            if version != nil, !updater.autoPrompted {
+                updater.autoPrompted = true
+                updater.showUpdatesUI = true
+            }
+        }
+        .sheet(isPresented: $updater.showUpdatesUI) { UpdatesView() }
         .sheet(item: $model.pendingPasswordDevice) { device in
             PasswordSheet(device: device)
         }

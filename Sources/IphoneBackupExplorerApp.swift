@@ -3,6 +3,7 @@ import SwiftUI
 @main
 struct IphoneBackupExplorerApp: App {
     @StateObject private var model = AppModel()
+    @StateObject private var updater = Updater()
 
     init() { SelfTest.runIfRequested() }
 
@@ -10,9 +11,16 @@ struct IphoneBackupExplorerApp: App {
         WindowGroup {
             ContentView()
                 .environmentObject(model)
+                .environmentObject(updater)
                 .frame(minWidth: 1000, minHeight: 600)
         }
         .commands {
+            CommandGroup(after: .appInfo) {
+                Button("Check for Updates…") {
+                    updater.showUpdatesUI = true
+                    updater.checkForUpdates()
+                }
+            }
             CommandGroup(replacing: .newItem) {
                 Button("Open Backup Folder…") { model.openSingleBackupFolder() }
                     .keyboardShortcut("o")
