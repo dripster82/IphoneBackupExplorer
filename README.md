@@ -5,18 +5,20 @@ previewing the photos, videos, audio and documents inside them, and exporting fi
 
 ## Features
 
-- Finds every backup in `~/Library/Application Support/MobileSync/Backup`, or opens any backup folder you choose.
+- Finds every backup in `~/Library/Application Support/MobileSync/Backup`, or opens any backup folder you choose (or drag one onto the window).
+- Guided **Full Disk Access** onboarding on first run, with a manual-folder fallback.
 - Supports **encrypted backups**: enter the backup password and the app unlocks the key bag and decrypts
-  `Manifest.db` and every file on the fly (AES-256 / RFC 3394 key unwrap via CommonCrypto). Nothing is
-  written back to the backup.
-- Browse by domain (Camera Roll, Home, Media, per-app containers, …) and by category
-  (Photos, Videos, Audio, Documents, Databases, Property Lists, Other), with search across paths.
-- List view (sortable table) or thumbnail grid for photos and videos.
-- Preview pane: images (HEIC, JPEG, PNG…), video and audio playback, pretty-printed plists/JSON/text,
-  Quick Look for everything else. Device info (model, iOS version, serial, installed apps) when nothing is selected.
-- Export a single file, the current selection, or everything in view. Keeps the `Domain/relative/path`
-  structure or flattens into one folder. Modification dates are restored. Progress + cancel + failure report.
-- Keyboard: ⌘O open backup folder, ⇧⌘O choose backups location, ⌘R rescan, ⌘E export selected, ⇧⌘E export all in view.
+  `Manifest.db` and every file on the fly. Nothing is written back to the backup.
+- Browse by domain and by category, with a combined **Photos & Videos** filter, list or thumbnail grid, and previews
+  (images, video/audio playback, pretty-printed plists/JSON/text, Quick Look for the rest).
+- **Data viewers** (shown when the database is present): Contacts, Messages, Call History, Voicemail (with audio),
+  Safari History, Bookmarks, Notes, Calendar, Reminders, and Photo Metadata (date, GPS). SMS/call/voicemail numbers
+  are linked to contact names. Message **attachments** show inline.
+- **Search Everything** (⇧⌘F) across files, contacts, messages and loaded data.
+- **Export** a single file, a selection, or everything in view (keep folder structure or flatten); copy a whole backup;
+  export contacts as CSV/vCard, any data viewer to CSV, and individual attachments/voicemails/photos.
+- **In-app auto-update** from GitHub Releases (Check for Updates…), verifying signature + notarization before installing.
+
 
 ## Building
 
