@@ -42,6 +42,12 @@ enum SelfTest {
         }
         if let raw = defaults.string(forKey: "parseData"), !raw.isEmpty,
            let db = defaults.string(forKey: "db"), !db.isEmpty {
+            if raw == "remindersModern" {
+                let recs = ExploreParser.remindersModern(url: URL(fileURLWithPath: db))
+                print("remindersModern: \(recs.count) records")
+                for r in recs.prefix(8) { print("  • \(r.title) | \(r.subtitle)") }
+                exit(0)
+            }
             guard let kind = DataKind(rawValue: raw) else { print("unknown kind \(raw)"); exit(1) }
             do {
                 let recs = try ExploreParser.parse(kind, url: URL(fileURLWithPath: db), resolver: nil)

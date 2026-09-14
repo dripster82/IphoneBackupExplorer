@@ -292,13 +292,24 @@ final class AppModel: ObservableObject {
 
     func dataFile(for kind: DataKind) -> BackupFile? { file(pathSuffix: kind.pathSuffix) }
 
+    /// Modern Reminders store files (Core Data), spread across several files.
+    var reminderStoreFiles: [BackupFile] {
+        allFiles.filter { $0.isRegularFile
+            && $0.relativePath.contains("Reminders/Container_v1/Stores/Data-")
+            && $0.relativePath.hasSuffix(".sqlite") }
+    }
+
     /// Which data viewers to offer, based on which databases exist in this backup.
     var availableDataKinds: [DataKind] {
         var kinds: [DataKind] = []
-        for kind in DataKind.allCases where dataFile(for: kind) != nil {
-            // Prefer modern call history over the legacy DB when both exist.
+        for kind in DataKind.allCases {
+            if kind == .reminders {
+                // Reminders come from the modern store, or legacy Calendar.sqlitedb.
+                if !reminderStoreFiles.isEmpty || dataFile(for: .calendar) != nil { kinds.append(kind) }
+                continue
+            }
+            guard dataFile(for: kind) != nil else { continue }
             if kind == .callsLegacy && kinds.contains(.calls) { continue }
-            if kind == .calls, dataFile(for: .callsLegacy) != nil { /* keep modern, drop legacy later */ }
             kinds.append(kind)
         }
         if kinds.contains(.calls) { kinds.removeAll { $0 == .callsLegacy } }
@@ -328,7 +339,31 @@ final class AppModel: ObservableObject {
             return
         }
         records = []
-        guard let session, let file = dataFile(for: kind) else { return }
+        guard let session else { return }
+
+        // Modern Reminders: merge rows from every reminders store file.
+        if kind == .reminders, !reminderStoreFiles.isEmpty {
+            let stores = reminderStoreFiles
+            isLoadingData = true
+            dataError = nil
+            Task {
+                let recs = await Task.detached(priority: .userInitiated) { () -> [DataRecord] in
+                    var all: [DataRecord] = []
+                    for f in stores {
+                        if let url = try? session.materialise(f) { all += ExploreParser.remindersModern(url: url) }
+                    }
+                    return all.sorted { ($0.date ?? .distantPast) > ($1.date ?? .distantPast) }
+                }.value
+                isLoadingData = false
+                guard workspace == .data(kind) else { return }
+                recordCache[kind] = recs
+                records = recs
+                selectedRecordID = recs.first?.id
+            }
+            return
+        }
+
+        guard let file = dataFile(for: kind) else { return }
         let needContacts = kind.needsContacts
         let contactsFile = self.contactsFile
         let existingContacts = self.contacts

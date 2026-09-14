@@ -411,3 +411,38 @@ extension DataRecord {
         return out
     }
 }
+
+extension ExploreParser {
+    /// Modern Reminders live in Library/Reminders/Container_v1/Stores/Data-*.sqlite (Core Data),
+    /// spread across several store files. Parse one store's ZREMCDREMINDER rows.
+    static func remindersModern(url: URL) -> [DataRecord] {
+        guard let db = SQLiteReader.open(url) else { return [] }
+        defer { sqlite3_close(db) }
+        guard SQLiteReader.tableExists(db, "ZREMCDREMINDER") else { return [] }
+        let cols = columns(db, "ZREMCDREMINDER")
+        func col(_ n: String, _ fallback: String = "NULL") -> String { cols.contains(n) ? n : fallback }
+        let sql = "SELECT Z_PK, \(col("ZTITLE")), \(col("ZNOTES")), \(col("ZDUEDATE")), \(col("ZCOMPLETED","0")), \(col("ZCOMPLETIONDATE")), \(col("ZCREATIONDATE")), \(col("ZFLAGGED","0")) FROM ZREMCDREMINDER WHERE \(col("ZTITLE")) IS NOT NULL ORDER BY \(col("ZCREATIONDATE")) DESC"
+        var stmt: OpaquePointer?
+        defer { sqlite3_finalize(stmt) }
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return [] }
+        var out: [DataRecord] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            let pk = sqlite3_column_int64(stmt, 0)
+            let title = SQLiteReader.text(stmt, 1)
+            let notes = SQLiteReader.text(stmt, 2)
+            let due = appleSeconds(sqlite3_column_double(stmt, 3))
+            let done = sqlite3_column_int(stmt, 4) == 1
+            let completed = appleSeconds(sqlite3_column_double(stmt, 5))
+            let flagged = sqlite3_column_int(stmt, 7) == 1
+            var fields: [DataRecord.Field] = [.init(label: "Status", value: done ? "Completed" : "Open")]
+            if due != nil { fields.append(.init(label: "Due", value: dateStr(due))) }
+            if completed != nil { fields.append(.init(label: "Completed", value: dateStr(completed))) }
+            if flagged { fields.append(.init(label: "Flagged", value: "Yes")) }
+            out.append(DataRecord(id: "rem-\(url.lastPathComponent)-\(pk)",
+                                  title: title.isEmpty ? "(no title)" : title,
+                                  subtitle: (done ? "✓ " : "○ ") + (due != nil ? "due \(dateStr(due))" : (notes.isEmpty ? "" : notes)),
+                                  date: due ?? completed, fields: fields, body: notes.isEmpty ? nil : notes))
+        }
+        return out
+    }
+}
