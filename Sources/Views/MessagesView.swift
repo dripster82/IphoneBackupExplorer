@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 
 struct MessagesListView: View {
     @EnvironmentObject var model: AppModel
@@ -67,11 +68,15 @@ struct ConversationView: View {
 }
 
 private struct MessageBubble: View {
+    @EnvironmentObject var model: AppModel
     let message: SMSMessage
     var body: some View {
         HStack {
             if message.isFromMe { Spacer(minLength: 40) }
-            VStack(alignment: message.isFromMe ? .trailing : .leading, spacing: 2) {
+            VStack(alignment: message.isFromMe ? .trailing : .leading, spacing: 3) {
+                ForEach(message.attachments, id: \.self) { att in
+                    AttachmentView(attachment: att)
+                }
                 if !message.text.isEmpty {
                     Text(message.text)
                         .textSelection(.enabled)
@@ -79,8 +84,8 @@ private struct MessageBubble: View {
                         .background(message.isFromMe ? Color.accentColor : Color.secondary.opacity(0.18),
                                     in: RoundedRectangle(cornerRadius: 14))
                         .foregroundStyle(message.isFromMe ? .white : .primary)
-                } else {
-                    Text("(no text — attachment or unsupported)").font(.caption).italic().foregroundStyle(.tertiary)
+                } else if message.attachments.isEmpty {
+                    Text("(no text — unsupported message)").font(.caption).italic().foregroundStyle(.tertiary)
                 }
                 if let d = message.date {
                     Text(d, format: .dateTime.day().month(.abbreviated).year().hour().minute())
@@ -89,5 +94,53 @@ private struct MessageBubble: View {
             }
             if !message.isFromMe { Spacer(minLength: 40) }
         }
+    }
+}
+
+private struct AttachmentView: View {
+    @EnvironmentObject var model: AppModel
+    let attachment: MessageAttachment
+    @State private var image: NSImage?
+    @State private var url: URL?
+    @State private var missing = false
+
+    var body: some View {
+        Group {
+            if let image {
+                Image(nsImage: image).resizable().aspectRatio(contentMode: .fit)
+                    .frame(maxWidth: 220, maxHeight: 220)
+                    .clipShape(RoundedRectangle(cornerRadius: 12))
+                    .onTapGesture { if let url { QuickLookPanelController.shared.show(url) } }
+            } else {
+                HStack(spacing: 6) {
+                    Image(systemName: missing ? "questionmark.square.dashed" : (attachment.isImage ? "photo" : "paperclip"))
+                    Text(attachment.displayName).lineLimit(1)
+                    if url != nil {
+                        Button { export() } label: { Image(systemName: "square.and.arrow.up") }.buttonStyle(.borderless)
+                    }
+                }
+                .font(.caption)
+                .padding(.horizontal, 10).padding(.vertical, 6)
+                .background(Color.secondary.opacity(0.15), in: RoundedRectangle(cornerRadius: 10))
+                .foregroundStyle(missing ? .secondary : .primary)
+            }
+        }
+        .task(id: attachment) { await load() }
+    }
+
+    private func load() async {
+        image = nil; url = nil; missing = false
+        guard let session = model.session,
+              let file = model.file(pathSuffix: attachment.pathSuffix) else { missing = true; return }
+        let u = try? await Task.detached(priority: .userInitiated) { try session.materialise(file) }.value
+        url = u
+        if attachment.isImage, let u {
+            image = await Task.detached { NSImage(contentsOf: u) }.value
+        }
+    }
+
+    private func export() {
+        guard let file = model.file(pathSuffix: attachment.pathSuffix) else { return }
+        model.exportFileWithPanel(file, suggestedName: attachment.displayName)
     }
 }

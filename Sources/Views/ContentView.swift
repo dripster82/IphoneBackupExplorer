@@ -15,6 +15,7 @@ struct ContentView: View {
                 case .files: FileBrowserView()
                 case .contacts: ContactsListView()
                 case .messages: MessagesListView()
+                case .data(let kind): DataListView(kind: kind)
                 }
             }
             .navigationSplitViewColumnWidth(min: 420, ideal: 620)
@@ -24,6 +25,7 @@ struct ContentView: View {
                 case .files: PreviewPane()
                 case .contacts: ContactDetailView()
                 case .messages: ConversationView()
+                case .data(let kind): DataDetailView(kind: kind)
                 }
             }
             .navigationSplitViewColumnWidth(min: 280, ideal: 380)
@@ -40,6 +42,14 @@ struct ContentView: View {
             }
         }
         .sheet(isPresented: $updater.showUpdatesUI) { UpdatesView() }
+        .sheet(isPresented: $model.showGlobalSearch) { GlobalSearchView() }
+        .onDrop(of: [.fileURL], isTargeted: nil) { providers in
+            guard let provider = providers.first else { return false }
+            _ = provider.loadObject(ofClass: URL.self) { url, _ in
+                if let url { Task { @MainActor in model.openDroppedFolder(url) } }
+            }
+            return true
+        }
         .sheet(item: $model.pendingPasswordDevice) { device in
             PasswordSheet(device: device)
         }

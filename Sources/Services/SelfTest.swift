@@ -25,6 +25,33 @@ enum SelfTest {
                 exit(0)
             }
         }
+        if let folder = defaults.string(forKey: "listExplore"), !folder.isEmpty {
+            do {
+                let device = try BackupLocator.load(backupFolder: URL(fileURLWithPath: folder))
+                let session = try BackupSession(device: device, password: defaults.string(forKey: "password"))
+                let files = try session.loadFiles()
+                print("files: \(files.count)")
+                func has(_ suffix: String) -> Bool { files.contains { $0.isRegularFile && $0.relativePath.hasSuffix(suffix) } }
+                print("contacts file: \(has("AddressBook.sqlitedb"))")
+                print("messages file: \(has("SMS/sms.db"))")
+                for kind in DataKind.allCases where has(kind.pathSuffix) {
+                    print("explore kind available: \(kind.rawValue) (\(kind.title))")
+                }
+                exit(0)
+            } catch { print("ERROR: \(error.localizedDescription)"); exit(1) }
+        }
+        if let raw = defaults.string(forKey: "parseData"), !raw.isEmpty,
+           let db = defaults.string(forKey: "db"), !db.isEmpty {
+            guard let kind = DataKind(rawValue: raw) else { print("unknown kind \(raw)"); exit(1) }
+            do {
+                let recs = try ExploreParser.parse(kind, url: URL(fileURLWithPath: db), resolver: nil)
+                print("\(kind.title): \(recs.count) records")
+                for r in recs.prefix(8) {
+                    print("  • \(r.title) | \(r.subtitle) | media=\(r.mediaPathSuffix ?? "-")")
+                }
+                exit(0)
+            } catch { print("ERROR: \(error.localizedDescription)"); exit(1) }
+        }
         if defaults.bool(forKey: "checkUpdate") {
             let current = defaults.string(forKey: "asVersion") ?? "1.0.0"
             let sem = DispatchSemaphore(value: 0)

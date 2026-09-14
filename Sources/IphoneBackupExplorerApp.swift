@@ -36,6 +36,10 @@ struct IphoneBackupExplorerApp: App {
                 Button("Refresh Backups") { model.scan() }
                     .keyboardShortcut("r")
             }
+            CommandGroup(after: .textEditing) {
+                Button("Search Everything…") { model.showGlobalSearch = true }
+                    .keyboardShortcut("f", modifiers: [.command, .shift])
+            }
             CommandMenu("Export") {
                 Button("Export Selected Files…") { model.exportSelected() }
                     .keyboardShortcut("e")

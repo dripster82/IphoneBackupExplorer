@@ -12,8 +12,7 @@ struct FileBrowserView: View {
                         .foregroundStyle(.secondary)
                 }
             } else if model.session == nil {
-                ContentUnavailableView("No Backup Open", systemImage: "externaldrive.badge.icloud",
-                                       description: Text("Select a backup in the sidebar, or open a backup folder with ⌘O."))
+                WelcomeView()
             } else {
                 VStack(spacing: 0) {
                     CategoryBar()

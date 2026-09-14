@@ -34,6 +34,15 @@ struct Contact: Identifiable, Hashable {
     }
 }
 
+struct MessageAttachment: Hashable {
+    let transferName: String
+    let mime: String
+    /// relativePath of the file inside the backup (MediaDomain), e.g. Library/SMS/Attachments/…
+    let pathSuffix: String
+    var isImage: Bool { mime.hasPrefix("image/") || ["jpg","jpeg","png","heic","heif","gif"].contains((pathSuffix as NSString).pathExtension.lowercased()) }
+    var displayName: String { transferName.isEmpty ? (pathSuffix as NSString).lastPathComponent : transferName }
+}
+
 struct SMSMessage: Identifiable, Hashable {
     let id: Int
     let text: String
@@ -41,6 +50,7 @@ struct SMSMessage: Identifiable, Hashable {
     let isFromMe: Bool
     let service: String
     let sender: String
+    var attachments: [MessageAttachment] = []
 }
 
 struct Conversation: Identifiable, Hashable {
@@ -184,6 +194,26 @@ enum MessagesStore {
             sqlite3_finalize(stmt); stmt = nil
         }
 
+        // Attachments: message_id -> [MessageAttachment]
+        var msgAttachments: [Int: [MessageAttachment]] = [:]
+        if SQLiteReader.tableExists(db, "attachment") && SQLiteReader.tableExists(db, "message_attachment_join") {
+            let aSQL = "SELECT maj.message_id, a.filename, a.transfer_name, a.mime_type FROM message_attachment_join maj JOIN attachment a ON a.ROWID = maj.attachment_id"
+            if sqlite3_prepare_v2(db, aSQL, -1, &stmt, nil) == SQLITE_OK {
+                while sqlite3_step(stmt) == SQLITE_ROW {
+                    let mid = Int(sqlite3_column_int(stmt, 0))
+                    var filename = SQLiteReader.text(stmt, 1)
+                    let transfer = SQLiteReader.text(stmt, 2)
+                    let mime = SQLiteReader.text(stmt, 3)
+                    // Stored as "~/Library/SMS/Attachments/…"; strip the leading ~/ to get the backup path.
+                    if filename.hasPrefix("~/") { filename = String(filename.dropFirst(2)) }
+                    else if filename.hasPrefix("/var/mobile/") { filename = String(filename.dropFirst("/var/mobile/".count)) }
+                    guard !filename.isEmpty else { continue }
+                    msgAttachments[mid, default: []].append(MessageAttachment(transferName: transfer, mime: mime, pathSuffix: filename))
+                }
+            }
+            sqlite3_finalize(stmt); stmt = nil
+        }
+
         var convMessages: [Int: [SMSMessage]] = [:]
         let msgSQL = "SELECT ROWID, text, attributedBody, date, is_from_me, handle_id, service FROM message ORDER BY date ASC"
         if sqlite3_prepare_v2(db, msgSQL, -1, &stmt, nil) == SQLITE_OK {
@@ -201,7 +231,7 @@ enum MessagesStore {
                 let service = SQLiteReader.text(stmt, 6)
                 let sender = fromMe ? "You" : (handleAddr[hid] ?? "Unknown")
                 let cid = msgChat[mid] ?? (hid == 0 ? -1 : 1_000_000 + hid) // fall back: group by handle when no chat table
-                let msg = SMSMessage(id: mid, text: text, date: date, isFromMe: fromMe, service: service, sender: sender)
+                let msg = SMSMessage(id: mid, text: text, date: date, isFromMe: fromMe, service: service, sender: sender, attachments: msgAttachments[mid] ?? [])
                 convMessages[cid, default: []].append(msg)
                 if chatName[cid] == nil { chatName[cid] = handleAddr[hid] ?? "Unknown" }
                 if hid != 0, let a = handleAddr[hid], !(chatHandles[cid]?.contains(a) ?? false) { chatHandles[cid, default: []].append(a) }
@@ -316,9 +346,25 @@ extension MessagesStore {
             let messages = convo.messages.map { m -> SMSMessage in
                 guard !m.isFromMe, let resolved = resolver.name(for: m.sender) else { return m }
                 return SMSMessage(id: m.id, text: m.text, date: m.date, isFromMe: m.isFromMe,
-                                  service: m.service, sender: resolved)
+                                  service: m.service, sender: resolved, attachments: m.attachments)
             }
             return Conversation(id: convo.id, name: name, handles: convo.handles, messages: messages)
         }
+    }
+}
+
+extension ContactsStore {
+    static func csv(_ contacts: [Contact]) -> String {
+        func esc(_ s: String) -> String {
+            (s.contains(",") || s.contains("\"") || s.contains("\n"))
+                ? "\"\(s.replacingOccurrences(of: "\"", with: "\"\""))\"" : s
+        }
+        var out = "Name,First,Last,Organization,Phones,Emails,Note\n"
+        for c in contacts {
+            out += [c.fullName, c.first, c.last, c.organization,
+                    c.phones.joined(separator: " / "), c.emails.joined(separator: " / "), c.note]
+                .map(esc).joined(separator: ",") + "\n"
+        }
+        return out
     }
 }

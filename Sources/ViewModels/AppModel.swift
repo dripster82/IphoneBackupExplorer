@@ -30,7 +30,7 @@ final class AppModel: ObservableObject {
     @Published var passwordError: String?
 
     // Workspace (files vs. parsed data views)
-    enum Workspace: Equatable { case files, contacts, messages }
+    enum Workspace: Equatable, Hashable { case files, contacts, messages, data(DataKind) }
     @Published var workspace: Workspace = .files
     @Published var contacts: [Contact] = []
     @Published var conversations: [Conversation] = []
@@ -40,6 +40,16 @@ final class AppModel: ObservableObject {
     @Published var selectedConversationID: Int?
     @Published var contactSearch = ""
     @Published var messageSearch = ""
+
+    // Generic data viewers (calls, Safari, voicemail, calendar, reminders, notes, photos)
+    @Published var records: [DataRecord] = []
+    @Published var selectedRecordID: String?
+    @Published var dataSearch = ""
+    private var recordCache: [DataKind: [DataRecord]] = [:]
+
+    // Global search
+    @Published var showGlobalSearch = false
+    @Published var globalSearchText = ""
 
     // Browsing
     @Published var selectedCategory: FileCategory = .all
@@ -115,6 +125,25 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// Handle a folder dropped onto the window: open it as a single backup, or as a backups root.
+    func openDroppedFolder(_ url: URL) {
+        let fm = FileManager.default
+        var isDir: ObjCBool = false
+        guard fm.fileExists(atPath: url.path, isDirectory: &isDir), isDir.boolValue else { return }
+        let hasManifest = fm.fileExists(atPath: url.appendingPathComponent("Manifest.db").path)
+            || fm.fileExists(atPath: url.appendingPathComponent("Info.plist").path)
+        if hasManifest {
+            do {
+                let device = try BackupLocator.load(backupFolder: url)
+                if !devices.contains(where: { $0.id == device.id }) { devices.insert(device, at: 0) }
+                select(device)
+            } catch { alertMessage = error.localizedDescription }
+        } else {
+            backupRoot = url
+            scan()
+        }
+    }
+
     func openPrivacySettings() {
         if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles") {
             NSWorkspace.shared.open(url)
@@ -169,6 +198,7 @@ final class AppModel: ObservableObject {
                 pendingPasswordDevice = nil
                 passwordError = nil
                 self.session = session
+                UserDefaults.standard.set(device.id, forKey: "lastDeviceID")
                 self.allFiles = files
                 self.domainSummaries = AppModel.summarise(files)
                 self.selectedDomain = nil
@@ -179,6 +209,9 @@ final class AppModel: ObservableObject {
                 self.conversations = []
                 self.selectedContactID = nil
                 self.selectedConversationID = nil
+                self.records = []
+                self.selectedRecordID = nil
+                self.recordCache = [:]
                 self.dataError = nil
             case .failure(let error):
                 if device.isEncrypted, case BackupError.wrongPassword = error {
@@ -210,6 +243,9 @@ final class AppModel: ObservableObject {
         conversations = []
         selectedContactID = nil
         selectedConversationID = nil
+        records = []
+        selectedRecordID = nil
+        recordCache = [:]
     }
 
     // MARK: Parsed data views (Contacts / Messages)
@@ -244,6 +280,85 @@ final class AppModel: ObservableObject {
     var selectedConversation: Conversation? { conversations.first { $0.id == selectedConversationID } }
 
     func showFiles() { workspace = .files }
+
+    // MARK: Generic data viewers
+
+    /// Finds a backup file whose relativePath ends with `suffix` (optionally in a specific domain).
+    func file(pathSuffix suffix: String, domain: String? = nil) -> BackupFile? {
+        allFiles.first { f in
+            f.isRegularFile && f.relativePath.hasSuffix(suffix) && (domain == nil || f.domain == domain)
+        }
+    }
+
+    func dataFile(for kind: DataKind) -> BackupFile? { file(pathSuffix: kind.pathSuffix) }
+
+    /// Which data viewers to offer, based on which databases exist in this backup.
+    var availableDataKinds: [DataKind] {
+        var kinds: [DataKind] = []
+        for kind in DataKind.allCases where dataFile(for: kind) != nil {
+            // Prefer modern call history over the legacy DB when both exist.
+            if kind == .callsLegacy && kinds.contains(.calls) { continue }
+            if kind == .calls, dataFile(for: .callsLegacy) != nil { /* keep modern, drop legacy later */ }
+            kinds.append(kind)
+        }
+        if kinds.contains(.calls) { kinds.removeAll { $0 == .callsLegacy } }
+        return kinds
+    }
+
+    var filteredRecords: [DataRecord] {
+        let q = dataSearch.trimmingCharacters(in: .whitespaces)
+        guard !q.isEmpty else { return records }
+        return records.filter { $0.searchText.localizedCaseInsensitiveContains(q) }
+    }
+    var selectedRecord: DataRecord? { records.first { $0.id == selectedRecordID } }
+
+    /// The backup file backing a record's associated media (voicemail audio, photo), if present.
+    func mediaFile(for record: DataRecord) -> BackupFile? {
+        guard let suffix = record.mediaPathSuffix else { return nil }
+        return file(pathSuffix: suffix, domain: record.mediaDomain)
+    }
+
+    func showData(_ kind: DataKind) {
+        workspace = .data(kind)
+        selectedRecordID = nil
+        dataSearch = ""
+        if let cached = recordCache[kind] {
+            records = cached
+            selectedRecordID = cached.first?.id
+            return
+        }
+        records = []
+        guard let session, let file = dataFile(for: kind) else { return }
+        let needContacts = kind.needsContacts
+        let contactsFile = self.contactsFile
+        let existingContacts = self.contacts
+        isLoadingData = true
+        dataError = nil
+        Task {
+            let result: Result<[DataRecord], Error> = await Task.detached(priority: .userInitiated) {
+                do {
+                    var resolver: ContactResolver? = nil
+                    if needContacts {
+                        var list = existingContacts
+                        if list.isEmpty, let cf = contactsFile { list = (try? ContactsStore.load(from: session.materialise(cf))) ?? [] }
+                        resolver = ContactResolver(list)
+                    }
+                    let url = try session.materialise(file)
+                    return .success(try ExploreParser.parse(kind, url: url, resolver: resolver))
+                } catch { return .failure(error) }
+            }.value
+            isLoadingData = false
+            guard workspace == .data(kind) else { return }
+            switch result {
+            case .success(let recs):
+                recordCache[kind] = recs
+                records = recs
+                selectedRecordID = recs.first?.id
+            case .failure(let error):
+                dataError = error.localizedDescription
+            }
+        }
+    }
 
     func showContacts() {
         workspace = .contacts
@@ -305,16 +420,125 @@ final class AppModel: ObservableObject {
         }
     }
 
+    // MARK: Global search
+
+    /// Load contacts/messages into their arrays for searching, without switching the visible workspace.
+    func ensureSearchDataLoaded() {
+        if let session, contacts.isEmpty, let cf = contactsFile {
+            Task {
+                let list = await Task.detached(priority: .utility) { (try? ContactsStore.load(from: session.materialise(cf))) ?? [] }.value
+                if contacts.isEmpty { contacts = list }
+            }
+        }
+        if let session, conversations.isEmpty, let mf = messagesFile {
+            let existing = contacts
+            let cf = contactsFile
+            Task {
+                let convos = await Task.detached(priority: .utility) { () -> [Conversation] in
+                    guard let raw = try? MessagesStore.load(from: session.materialise(mf)) else { return [] }
+                    var list = existing
+                    if list.isEmpty, let cf { list = (try? ContactsStore.load(from: session.materialise(cf))) ?? [] }
+                    return MessagesStore.resolve(raw, with: ContactResolver(list))
+                }.value
+                if conversations.isEmpty { conversations = convos }
+            }
+        }
+    }
+
+    func globalResults() -> [GlobalResult] {
+        let q = globalSearchText.trimmingCharacters(in: .whitespaces)
+        guard q.count >= 2 else { return [] }
+        var out: [GlobalResult] = []
+
+        for f in allFiles where f.isRegularFile && f.relativePath.localizedCaseInsensitiveContains(q) {
+            out.append(GlobalResult(id: "f-\(f.id)", group: "Files", icon: f.category.systemImage,
+                                    title: f.fileName, subtitle: f.domainDisplayName + " · " + f.relativePath,
+                                    target: .file(f.id)))
+            if out.count > 60 { break }
+        }
+        for c in contacts where c.fullName.localizedCaseInsensitiveContains(q)
+            || c.phones.contains(where: { $0.localizedCaseInsensitiveContains(q) })
+            || c.emails.contains(where: { $0.localizedCaseInsensitiveContains(q) }) {
+            out.append(GlobalResult(id: "c-\(c.id)", group: "Contacts", icon: "person.crop.circle",
+                                    title: c.fullName, subtitle: (c.phones + c.emails).joined(separator: " · "),
+                                    target: .contact(c.id)))
+        }
+        for convo in conversations where convo.name.localizedCaseInsensitiveContains(q)
+            || convo.messages.contains(where: { $0.text.localizedCaseInsensitiveContains(q) }) {
+            let hit = convo.messages.first { $0.text.localizedCaseInsensitiveContains(q) }
+            out.append(GlobalResult(id: "m-\(convo.id)", group: "Messages", icon: "message",
+                                    title: convo.name, subtitle: hit?.text ?? convo.preview,
+                                    target: .conversation(convo.id)))
+        }
+        for (kind, recs) in recordCache {
+            for r in recs where r.searchText.localizedCaseInsensitiveContains(q) {
+                out.append(GlobalResult(id: "r-\(kind.rawValue)-\(r.id)", group: kind.title, icon: kind.icon,
+                                        title: r.title, subtitle: r.subtitle, target: .record(kind, r.id)))
+            }
+        }
+        return out
+    }
+
+    func openResult(_ result: GlobalResult) {
+        showGlobalSearch = false
+        switch result.target {
+        case .file(let id):
+            showFiles(); selectedDomain = nil; selectedCategory = .all; searchText = ""
+            selection = [id]
+        case .contact(let cid):
+            showContacts(); selectedContactID = cid
+        case .conversation(let convoID):
+            showMessages(); selectedConversationID = convoID
+        case .record(let kind, let rid):
+            showData(kind); selectedRecordID = rid
+        }
+    }
+
     func exportContacts() {
         guard !contacts.isEmpty else { return }
         let panel = NSSavePanel()
         panel.nameFieldStringValue = "Contacts.vcf"
-        panel.allowedContentTypes = [.vCard]
-        panel.message = "Export \(contacts.count) contacts as a vCard file"
+        panel.allowedContentTypes = [.vCard, .commaSeparatedText]
+        panel.message = "Export \(contacts.count) contacts (vCard, or choose .csv)"
         guard panel.runModal() == .OK, let url = panel.url else { return }
-        do { try ContactsStore.vCard(contacts).write(to: url, atomically: true, encoding: .utf8)
+        do {
+            let text = url.pathExtension.lowercased() == "csv" ? ContactsStore.csv(contacts) : ContactsStore.vCard(contacts)
+            try text.write(to: url, atomically: true, encoding: .utf8)
             NSWorkspace.shared.activateFileViewerSelecting([url])
         } catch { alertMessage = error.localizedDescription }
+    }
+
+    /// Export the current data viewer's records to CSV.
+    func exportRecords(kind: DataKind) {
+        guard !records.isEmpty else { return }
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = "\(kind.title).csv"
+        panel.allowedContentTypes = [.commaSeparatedText]
+        panel.message = "Export \(records.count) \(kind.title.lowercased()) rows as CSV"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do { try DataRecord.csv(records).write(to: url, atomically: true, encoding: .utf8)
+            NSWorkspace.shared.activateFileViewerSelecting([url])
+        } catch { alertMessage = error.localizedDescription }
+    }
+
+    /// Export any backup file via a save panel (used for message attachments).
+    func exportFileWithPanel(_ file: BackupFile, suggestedName: String) {
+        guard let session else { return }
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = suggestedName.isEmpty ? file.fileName : suggestedName
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do { try session.extract(file, to: url); NSWorkspace.shared.activateFileViewerSelecting([url]) }
+        catch { alertMessage = error.localizedDescription }
+    }
+
+    /// Export a single record's associated media file (voicemail audio, photo).
+    func exportRecordMedia(_ record: DataRecord) {
+        guard let session, let file = mediaFile(for: record) else { return }
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = file.fileName
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do { try session.extract(file, to: url); NSWorkspace.shared.activateFileViewerSelecting([url]) }
+        catch { alertMessage = error.localizedDescription }
     }
 
     func exportConversation(_ conversation: Conversation) {

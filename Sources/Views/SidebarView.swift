@@ -37,6 +37,10 @@ struct SidebarView: View {
                         ExploreRow(name: "Messages", icon: "message", isSelected: model.workspace == .messages)
                             .onTapGesture { model.showMessages() }
                     }
+                    ForEach(model.availableDataKinds) { kind in
+                        ExploreRow(name: kind.title, icon: kind.icon, isSelected: model.workspace == .data(kind))
+                            .onTapGesture { model.showData(kind) }
+                    }
                 }
 
                 Section("Domains") {
