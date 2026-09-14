@@ -12,9 +12,12 @@ struct ContentView: View {
         } content: {
             Group {
                 switch model.workspace {
+                case .overview: OverviewView()
                 case .files: FileBrowserView()
                 case .contacts: ContactsListView()
                 case .messages: MessagesListView()
+                case .whatsapp: MessagesListView()
+                case .data(.photos): PhotosGalleryView()
                 case .data(let kind): DataListView(kind: kind)
                 }
             }
@@ -22,9 +25,12 @@ struct ContentView: View {
         } detail: {
             Group {
                 switch model.workspace {
+                case .overview: OverviewDetail()
                 case .files: PreviewPane()
                 case .contacts: ContactDetailView()
                 case .messages: ConversationView()
+                case .whatsapp: ConversationView()
+                case .data(.photos): DataDetailView(kind: .photos)
                 case .data(let kind): DataDetailView(kind: kind)
                 }
             }

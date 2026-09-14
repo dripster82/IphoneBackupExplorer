@@ -1,5 +1,8 @@
 import SwiftUI
 import AppKit
+import MapKit
+import ImageIO
+import CoreLocation
 
 struct DataListView: View {
     @EnvironmentObject var model: AppModel
@@ -14,7 +17,7 @@ struct DataListView: View {
             } else if model.records.isEmpty {
                 ContentUnavailableView("No \(kind.title)", systemImage: kind.icon, description: Text("This backup has no \(kind.title.lowercased())."))
             } else {
-                List(selection: $model.selectedRecordID) {
+                List(selection: $model.recordSelection) {
                     ForEach(model.filteredRecords) { record in
                         VStack(alignment: .leading, spacing: 2) {
                             HStack {
@@ -35,15 +38,24 @@ struct DataListView: View {
             }
         }
         .navigationTitle(kind.title)
-        .navigationSubtitle(model.records.isEmpty ? "" : "\(model.records.count) items")
+        .navigationSubtitle(subtitle)
         .searchable(text: $model.dataSearch, placement: .toolbar, prompt: "Search \(kind.title.lowercased())")
         .toolbar {
-            ToolbarItem {
+            ToolbarItemGroup {
+                Menu {
+                    Toggle("Sort by name", isOn: $model.dataSortByName)
+                } label: { Label("Sort", systemImage: "arrow.up.arrow.down") }
                 Button { model.exportRecords(kind: kind) } label: { Label("Export", systemImage: "square.and.arrow.up") }
                     .disabled(model.records.isEmpty)
-                    .help("Export all \(kind.title.lowercased()) as CSV")
+                    .help("Export selected rows (or all shown)")
             }
         }
+    }
+
+    private var subtitle: String {
+        let n = model.filteredRecords.count
+        let sel = model.recordSelection.count
+        return sel > 0 ? "\(sel) selected of \(n)" : "\(n) items"
     }
 }
 
@@ -52,9 +64,11 @@ struct DataDetailView: View {
     let kind: DataKind
     @State private var mediaURL: URL?
     @State private var image: NSImage?
+    @State private var exif: [(String, String)] = []
+    @State private var coordinate: CLLocationCoordinate2D?
 
     var body: some View {
-        if let record = model.selectedRecord {
+        if let record = model.currentRecord {
             ScrollView {
                 VStack(alignment: .leading, spacing: 14) {
                     Label(record.title, systemImage: kind.icon).font(.title3).bold()
@@ -64,6 +78,22 @@ struct DataDetailView: View {
                         mediaView(for: record)
                     }
 
+                    if let coordinate {
+                        Map(initialPosition: .region(MKCoordinateRegion(center: coordinate,
+                            span: MKCoordinateSpan(latitudeDelta: 0.02, longitudeDelta: 0.02)))) {
+                            Marker(record.title, coordinate: coordinate)
+                        }
+                        .frame(height: 180).clipShape(RoundedRectangle(cornerRadius: 8))
+                    }
+                    if !exif.isEmpty {
+                        DisclosureGroup("Photo details") {
+                            Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 4) {
+                                ForEach(exif, id: \.0) { e in
+                                    GridRow { Text(e.0).foregroundStyle(.secondary).gridColumnAlignment(.trailing); Text(e.1).textSelection(.enabled) }
+                                }
+                            }.font(.caption)
+                        }
+                    }
                     if !record.fields.isEmpty {
                         Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 6) {
                             ForEach(record.fields, id: \.self) { f in
@@ -117,13 +147,40 @@ struct DataDetailView: View {
     }
 
     private func loadMedia(_ record: DataRecord) async {
-        mediaURL = nil; image = nil
+        mediaURL = nil; image = nil; exif = []; coordinate = nil
         guard let file = model.mediaFile(for: record), let session = model.session else { return }
         let url = try? await Task.detached(priority: .userInitiated) { try session.materialise(file) }.value
         mediaURL = url
+        // Map coordinate from the record's Location field.
+        if let loc = record.fields.first(where: { $0.label == "Location" })?.value {
+            let parts = loc.split(separator: ",").compactMap { Double($0.trimmingCharacters(in: .whitespaces)) }
+            if parts.count == 2 { coordinate = CLLocationCoordinate2D(latitude: parts[0], longitude: parts[1]) }
+        }
         if let url, ["jpg","jpeg","png","heic","heif","gif","tiff"].contains(url.pathExtension.lowercased()) {
             image = await Task.detached { NSImage(contentsOf: url) }.value
+            exif = await Task.detached { DataDetailView.readEXIF(url) }.value
         }
+    }
+
+    static func readEXIF(_ url: URL) -> [(String, String)] {
+        guard let src = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any] else { return [] }
+        var out: [(String, String)] = []
+        if let w = props[kCGImagePropertyPixelWidth], let h = props[kCGImagePropertyPixelHeight] {
+            out.append(("Dimensions", "\(w) × \(h)"))
+        }
+        if let exif = props[kCGImagePropertyExifDictionary] as? [CFString: Any] {
+            if let lens = exif[kCGImagePropertyExifLensModel] as? String { out.append(("Lens", lens)) }
+            if let iso = (exif[kCGImagePropertyExifISOSpeedRatings] as? [Int])?.first { out.append(("ISO", "\(iso)")) }
+            if let f = exif[kCGImagePropertyExifFNumber] as? Double { out.append(("Aperture", String(format: "f/%.1f", f))) }
+            if let et = exif[kCGImagePropertyExifExposureTime] as? Double, et > 0 { out.append(("Shutter", et < 1 ? "1/\(Int((1/et).rounded()))s" : "\(et)s")) }
+        }
+        if let tiff = props[kCGImagePropertyTIFFDictionary] as? [CFString: Any] {
+            if let make = tiff[kCGImagePropertyTIFFMake] as? String, let modelName = tiff[kCGImagePropertyTIFFModel] as? String {
+                out.append(("Camera", "\(make) \(modelName)"))
+            }
+        }
+        return out
     }
 
     private func openInMaps(_ coords: String) {

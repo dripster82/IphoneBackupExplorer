@@ -23,7 +23,7 @@ struct DataRecord: Identifiable, Hashable {
 
 /// The kinds of parsed-data viewers beyond Files/Contacts/Messages.
 enum DataKind: String, CaseIterable, Identifiable, Hashable {
-    case calls, callsLegacy, safariHistory, safariBookmarks, notes, voicemails, calendar, reminders, photos
+    case calls, callsLegacy, safariHistory, safariBookmarks, notes, voicemails, calendar, reminders, photos, health
     var id: String { rawValue }
 
     var title: String {
@@ -36,6 +36,7 @@ enum DataKind: String, CaseIterable, Identifiable, Hashable {
         case .calendar: return "Calendar"
         case .reminders: return "Reminders"
         case .photos: return "Photo Metadata"
+        case .health: return "Health"
         }
     }
     var icon: String {
@@ -48,6 +49,7 @@ enum DataKind: String, CaseIterable, Identifiable, Hashable {
         case .calendar: return "calendar"
         case .reminders: return "checklist"
         case .photos: return "photo.stack"
+        case .health: return "heart.text.square"
         }
     }
     /// Whether to also load contacts, to resolve phone numbers to names.
@@ -65,6 +67,7 @@ enum DataKind: String, CaseIterable, Identifiable, Hashable {
         case .calendar: return "Calendar.sqlitedb"
         case .reminders: return "Calendar.sqlitedb"
         case .photos: return "Photos.sqlite"
+        case .health: return "healthdb_secure.sqlite"
         }
     }
 }
@@ -118,6 +121,7 @@ enum ExploreParser {
         case .reminders:      return try calendarItems(db, reminders: true)
         case .notes:          return try notes(db)
         case .photos:         return try photos(db)
+        case .health:         return try health(db)
         }
     }
 
@@ -352,8 +356,51 @@ enum ExploreParser {
 
     // MARK: Photos metadata (Photos.sqlite — best effort)
 
+    /// asset Z_PK -> [album title]. Discovers the schema-versioned Z_NNASSETS join table.
+    static func photoAlbums(_ db: OpaquePointer) -> [Int64: [String]] {
+        // album Z_PK -> title
+        var albumTitle: [Int64: String] = [:]
+        var stmt: OpaquePointer?
+        if SQLiteReader.tableExists(db, "ZGENERICALBUM"),
+           sqlite3_prepare_v2(db, "SELECT Z_PK, ZTITLE FROM ZGENERICALBUM WHERE ZTITLE IS NOT NULL AND ZTITLE <> ''", -1, &stmt, nil) == SQLITE_OK {
+            while sqlite3_step(stmt) == SQLITE_ROW {
+                let title = SQLiteReader.text(stmt, 1)
+                if title.hasPrefix("progress-") { continue }   // internal sync albums
+                albumTitle[sqlite3_column_int64(stmt, 0)] = title
+            }
+        }
+        sqlite3_finalize(stmt); stmt = nil
+        guard !albumTitle.isEmpty else { return [:] }
+
+        // find the join table: name like Z_<n>ASSETS with an album column and an asset column
+        var joinTable: String?
+        if sqlite3_prepare_v2(db, "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'Z\\_%ASSETS' ESCAPE '\\'", -1, &stmt, nil) == SQLITE_OK {
+            while sqlite3_step(stmt) == SQLITE_ROW {
+                let name = SQLiteReader.text(stmt, 0)
+                let c = columns(db, name)
+                if c.contains(where: { $0.hasSuffix("ALBUMS") }) && c.contains(where: { $0.hasSuffix("ASSETS") }) { joinTable = name; break }
+            }
+        }
+        sqlite3_finalize(stmt); stmt = nil
+        guard let joinTable else { return [:] }
+        let jc = columns(db, joinTable)
+        guard let albumCol = jc.first(where: { $0.hasSuffix("ALBUMS") && !$0.hasPrefix("Z_FOK") }),
+              let assetCol = jc.first(where: { $0.hasSuffix("ASSETS") && !$0.hasPrefix("Z_FOK") }) else { return [:] }
+
+        var map: [Int64: [String]] = [:]
+        if sqlite3_prepare_v2(db, "SELECT \(assetCol), \(albumCol) FROM \(joinTable)", -1, &stmt, nil) == SQLITE_OK {
+            while sqlite3_step(stmt) == SQLITE_ROW {
+                let asset = sqlite3_column_int64(stmt, 0)
+                if let title = albumTitle[sqlite3_column_int64(stmt, 1)] { map[asset, default: []].append(title) }
+            }
+        }
+        sqlite3_finalize(stmt)
+        return map
+    }
+
     static func photos(_ db: OpaquePointer) throws -> [DataRecord] {
         guard SQLiteReader.tableExists(db, "ZASSET") else { throw BackupError.sqlite("no photo assets") }
+        let albums = photoAlbums(db)
         let cols = columns(db, "ZASSET")
         let fn = cols.contains("ZFILENAME") ? "ZFILENAME" : "NULL"
         let dir = cols.contains("ZDIRECTORY") ? "ZDIRECTORY" : "NULL"
@@ -381,6 +428,8 @@ enum ExploreParser {
                 fields.append(.init(label: "Location", value: loc!))
             }
             if favorite { fields.append(.init(label: "Favorite", value: "Yes")) }
+            let albumNames = albums[pk] ?? []
+            if !albumNames.isEmpty { fields.append(.init(label: "Album", value: albumNames.joined(separator: ", "))) }
             let suffix = directory.isEmpty ? filename : "\(directory)/\(filename)"
             out.append(DataRecord(id: "asset-\(pk)", title: filename.isEmpty ? "Asset \(pk)" : filename,
                                   subtitle: [dateStr(created), loc].compactMap { $0 }.joined(separator: " · "),
@@ -444,5 +493,39 @@ extension ExploreParser {
                                   date: due ?? completed, fields: fields, body: notes.isEmpty ? nil : notes))
         }
         return out
+    }
+}
+
+extension ExploreParser {
+    /// Best-effort Health summary: sample counts and date range per data-type code.
+    /// (Health type names aren't stored as text and vary by iOS, so codes are shown as-is.)
+    static func health(_ db: OpaquePointer) throws -> [DataRecord] {
+        guard SQLiteReader.tableExists(db, "samples") else { throw BackupError.sqlite("no Health samples") }
+        let cols = columns(db, "samples")
+        guard cols.contains("data_type") else { throw BackupError.sqlite("unrecognised Health schema") }
+        let hasStart = cols.contains("start_date")
+        let sql = "SELECT data_type, count(*), \(hasStart ? "min(start_date), max(start_date)" : "0, 0") FROM samples GROUP BY data_type ORDER BY 2 DESC"
+        var stmt: OpaquePointer?
+        defer { sqlite3_finalize(stmt) }
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { throw BackupError.sqlite(String(cString: sqlite3_errmsg(db))) }
+        var out: [DataRecord] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            let type = sqlite3_column_int64(stmt, 0)
+            let count = sqlite3_column_int64(stmt, 1)
+            let first = appleSeconds(sqlite3_column_double(stmt, 2))
+            let last = appleSeconds(sqlite3_column_double(stmt, 3))
+            out.append(DataRecord(id: "health-\(type)", title: healthName(type),
+                                  subtitle: "\(count) samples" + (first != nil ? " · \(dateStr(first)) – \(dateStr(last))" : ""),
+                                  date: last,
+                                  fields: [.init(label: "Type code", value: "\(type)"), .init(label: "Samples", value: "\(count)"),
+                                           .init(label: "First", value: dateStr(first)), .init(label: "Last", value: dateStr(last))]))
+        }
+        return out
+    }
+    /// Friendly names for the most common HealthKit sample type codes (best-effort; codes shift across iOS).
+    static func healthName(_ code: Int64) -> String {
+        let map: [Int64: String] = [7: "Steps", 8: "Distance", 9: "Resting Energy", 10: "Active Energy",
+                                    5: "Heart Rate", 12: "Flights Climbed", 3: "Height", 4: "Body Mass"]
+        return map[code] ?? "Health type \(code)"
     }
 }

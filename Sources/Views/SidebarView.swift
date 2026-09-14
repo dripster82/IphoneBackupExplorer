@@ -27,6 +27,8 @@ struct SidebarView: View {
 
             if model.session != nil {
                 Section("Explore") {
+                    ExploreRow(name: "Overview", icon: "chart.bar.doc.horizontal", isSelected: model.workspace == .overview)
+                        .onTapGesture { model.showOverview() }
                     ExploreRow(name: "Files", icon: "folder", isSelected: model.workspace == .files)
                         .onTapGesture { model.showFiles() }
                     if model.contactsFile != nil {
@@ -36,6 +38,10 @@ struct SidebarView: View {
                     if model.messagesFile != nil {
                         ExploreRow(name: "Messages", icon: "message", isSelected: model.workspace == .messages)
                             .onTapGesture { model.showMessages() }
+                    }
+                    if model.whatsappFile != nil {
+                        ExploreRow(name: "WhatsApp", icon: "phone.bubble", isSelected: model.workspace == .whatsapp)
+                            .onTapGesture { model.showWhatsApp() }
                     }
                     ForEach(model.availableDataKinds) { kind in
                         ExploreRow(name: kind.title, icon: kind.icon, isSelected: model.workspace == .data(kind))

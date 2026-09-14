@@ -52,6 +52,10 @@ enum SelfTest {
             do {
                 let recs = try ExploreParser.parse(kind, url: URL(fileURLWithPath: db), resolver: nil)
                 print("\(kind.title): \(recs.count) records")
+                let withAlbum = recs.filter { $0.fields.contains { $0.label == "Album" } }
+                if !withAlbum.isEmpty {
+                    print("  records in albums: \(withAlbum.count); sample: \(withAlbum.first!.title) → \(withAlbum.first!.fields.first { $0.label == "Album" }!.value)")
+                }
                 for r in recs.prefix(8) {
                     print("  • \(r.title) | \(r.subtitle) | media=\(r.mediaPathSuffix ?? "-")")
                 }
@@ -93,6 +97,21 @@ enum SelfTest {
                 let contacts = try ContactsStore.load(from: URL(fileURLWithPath: db))
                 print("contacts: \(contacts.count)")
                 for c in contacts.prefix(10) { print("  \(c.fullName) | phones=\(c.phones) emails=\(c.emails) org=\(c.organization)") }
+                exit(0)
+            } catch { print("ERROR: \(error.localizedDescription)"); exit(1) }
+        }
+        if let db = defaults.string(forKey: "parseWhatsApp"), !db.isEmpty {
+            do {
+                var convos = try WhatsAppStore.load(from: URL(fileURLWithPath: db), resolver: nil)
+                if let ab = defaults.string(forKey: "withContacts"), !ab.isEmpty {
+                    let contacts = try ContactsStore.load(from: URL(fileURLWithPath: ab))
+                    convos = try WhatsAppStore.load(from: URL(fileURLWithPath: db), resolver: ContactResolver(contacts))
+                }
+                print("whatsapp conversations: \(convos.count)")
+                for c in convos.prefix(8) {
+                    print("  [\(c.name)] msgs=\(c.messages.count) last=\(c.lastDate.map { "\($0)" } ?? "-")")
+                    for m in c.messages.suffix(2) { print("      \(m.sender): \(m.text.prefix(50))") }
+                }
                 exit(0)
             } catch { print("ERROR: \(error.localizedDescription)"); exit(1) }
         }

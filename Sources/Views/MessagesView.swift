@@ -31,9 +31,16 @@ struct MessagesListView: View {
                 }
             }
         }
-        .navigationTitle("Messages")
+        .navigationTitle(model.workspace == .whatsapp ? "WhatsApp" : "Messages")
         .navigationSubtitle(model.conversations.isEmpty ? "" : "\(model.conversations.count) conversations")
-        .searchable(text: $model.messageSearch, placement: .toolbar, prompt: "Search messages")
+        .searchable(text: $model.messageSearch, placement: .toolbar, prompt: "Search conversations")
+        .toolbar {
+            ToolbarItem {
+                Button { model.exportAllConversations() } label: { Label("Export All", systemImage: "square.and.arrow.up.on.square") }
+                    .disabled(model.activeConversations.isEmpty)
+                    .help("Export every conversation as an HTML transcript")
+            }
+        }
     }
 }
 
@@ -57,6 +64,7 @@ struct ConversationView: View {
                     }
                     Spacer()
                     Button { model.exportConversation(convo) } label: { Label("Export Transcript", systemImage: "square.and.arrow.up") }
+                    Button { model.exportAllConversations() } label: { Label("Export All", systemImage: "square.and.arrow.up.on.square") }
                 }
                 .padding(.horizontal, 12).padding(.vertical, 6)
             }

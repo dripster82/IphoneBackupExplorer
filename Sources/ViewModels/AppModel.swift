@@ -30,10 +30,11 @@ final class AppModel: ObservableObject {
     @Published var passwordError: String?
 
     // Workspace (files vs. parsed data views)
-    enum Workspace: Equatable, Hashable { case files, contacts, messages, data(DataKind) }
+    enum Workspace: Equatable, Hashable { case overview, files, contacts, messages, whatsapp, data(DataKind) }
     @Published var workspace: Workspace = .files
     @Published var contacts: [Contact] = []
     @Published var conversations: [Conversation] = []
+    @Published var whatsappConversations: [Conversation] = []
     @Published var isLoadingData = false
     @Published var dataError: String?
     @Published var selectedContactID: Int?
@@ -45,7 +46,15 @@ final class AppModel: ObservableObject {
     @Published var records: [DataRecord] = []
     @Published var selectedRecordID: String?
     @Published var dataSearch = ""
+    @Published var recordSelection: Set<String> = []
+    @Published var dataSortByName = false
     private var recordCache: [DataKind: [DataRecord]] = [:]
+
+    // Photos gallery
+    @Published var photoSelection: Set<String> = []
+    @Published var photoAlbumFilter: String? = nil
+    @Published var photoFavoritesOnly = false
+    @Published var photoGPSOnly = false
 
     // Global search
     @Published var showGlobalSearch = false
@@ -204,9 +213,10 @@ final class AppModel: ObservableObject {
                 self.selectedDomain = nil
                 self.selectedCategory = .all
                 self.selection = []
-                self.workspace = .files
+                self.workspace = .overview
                 self.contacts = []
                 self.conversations = []
+                self.whatsappConversations = []
                 self.selectedContactID = nil
                 self.selectedConversationID = nil
                 self.records = []
@@ -246,6 +256,8 @@ final class AppModel: ObservableObject {
         records = []
         selectedRecordID = nil
         recordCache = [:]
+        photoSelection = []
+        photoAlbumFilter = nil
     }
 
     // MARK: Parsed data views (Contacts / Messages)
@@ -255,6 +267,12 @@ final class AppModel: ObservableObject {
     }
     var messagesFile: BackupFile? {
         allFiles.first { $0.domain == "HomeDomain" && $0.relativePath == "Library/SMS/sms.db" }
+    }
+    var whatsappFile: BackupFile? { file(pathSuffix: "ChatStorage.sqlite") }
+
+    /// Conversations for whichever messaging workspace is active.
+    var activeConversations: [Conversation] {
+        workspace == .whatsapp ? whatsappConversations : conversations
     }
 
     var filteredContacts: [Contact] {
@@ -269,17 +287,18 @@ final class AppModel: ObservableObject {
     }
     var filteredConversations: [Conversation] {
         let q = messageSearch.trimmingCharacters(in: .whitespaces)
-        guard !q.isEmpty else { return conversations }
-        return conversations.filter {
+        guard !q.isEmpty else { return activeConversations }
+        return activeConversations.filter {
             $0.name.localizedCaseInsensitiveContains(q)
                 || $0.handles.contains { $0.localizedCaseInsensitiveContains(q) }
                 || $0.messages.contains { $0.text.localizedCaseInsensitiveContains(q) }
         }
     }
     var selectedContact: Contact? { contacts.first { $0.id == selectedContactID } }
-    var selectedConversation: Conversation? { conversations.first { $0.id == selectedConversationID } }
+    var selectedConversation: Conversation? { activeConversations.first { $0.id == selectedConversationID } }
 
     func showFiles() { workspace = .files }
+    func showOverview() { workspace = .overview }
 
     // MARK: Generic data viewers
 
@@ -318,10 +337,16 @@ final class AppModel: ObservableObject {
 
     var filteredRecords: [DataRecord] {
         let q = dataSearch.trimmingCharacters(in: .whitespaces)
-        guard !q.isEmpty else { return records }
-        return records.filter { $0.searchText.localizedCaseInsensitiveContains(q) }
+        var rows = q.isEmpty ? records : records.filter { $0.searchText.localizedCaseInsensitiveContains(q) }
+        if dataSortByName { rows.sort { $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending } }
+        return rows
     }
     var selectedRecord: DataRecord? { records.first { $0.id == selectedRecordID } }
+    /// Detail target: the (single) currently-selected record.
+    var currentRecord: DataRecord? {
+        if let id = recordSelection.first, recordSelection.count == 1 { return records.first { $0.id == id } }
+        return selectedRecord
+    }
 
     /// The backup file backing a record's associated media (voicemail audio, photo), if present.
     func mediaFile(for record: DataRecord) -> BackupFile? {
@@ -332,6 +357,7 @@ final class AppModel: ObservableObject {
     func showData(_ kind: DataKind) {
         workspace = .data(kind)
         selectedRecordID = nil
+        recordSelection = []
         dataSearch = ""
         if let cached = recordCache[kind] {
             records = cached
@@ -435,6 +461,34 @@ final class AppModel: ObservableObject {
         }
     }
 
+    func showWhatsApp() {
+        workspace = .whatsapp
+        selectedConversationID = whatsappConversations.first?.id
+        guard whatsappConversations.isEmpty, let session, let file = whatsappFile else { return }
+        let contactsFile = self.contactsFile
+        let existingContacts = self.contacts
+        isLoadingData = true
+        dataError = nil
+        Task {
+            let result: Result<[Conversation], Error> = await Task.detached(priority: .userInitiated) {
+                do {
+                    var list = existingContacts
+                    if list.isEmpty, let cf = contactsFile { list = (try? ContactsStore.load(from: session.materialise(cf))) ?? [] }
+                    let convos = try WhatsAppStore.load(from: session.materialise(file), resolver: ContactResolver(list))
+                    return .success(convos)
+                } catch { return .failure(error) }
+            }.value
+            isLoadingData = false
+            guard workspace == .whatsapp else { return }
+            switch result {
+            case .success(let convos):
+                self.whatsappConversations = convos
+                self.selectedConversationID = convos.first?.id
+            case .failure(let error): self.dataError = error.localizedDescription
+            }
+        }
+    }
+
     private func loadData<T>(file: BackupFile, session: BackupSession,
                              parse: @escaping (URL) throws -> T,
                              onSuccess: @escaping (T) -> Void) {
@@ -529,6 +583,78 @@ final class AppModel: ObservableObject {
         }
     }
 
+    // MARK: Photos gallery
+
+    var photoAlbums: [String] {
+        var set = Set<String>()
+        for r in records {
+            if let a = r.fields.first(where: { $0.label == "Album" })?.value {
+                a.components(separatedBy: ", ").forEach { set.insert($0) }
+            }
+        }
+        return set.sorted()
+    }
+
+    var filteredPhotos: [DataRecord] {
+        let q = dataSearch.trimmingCharacters(in: .whitespaces)
+        return records.filter { r in
+            if photoFavoritesOnly && !(r.fields.contains { $0.label == "Favorite" }) { return false }
+            if photoGPSOnly && !(r.fields.contains { $0.label == "Location" }) { return false }
+            if let album = photoAlbumFilter {
+                let names = r.fields.first { $0.label == "Album" }?.value ?? ""
+                if !names.components(separatedBy: ", ").contains(album) { return false }
+            }
+            if !q.isEmpty && !r.searchText.localizedCaseInsensitiveContains(q) { return false }
+            return true
+        }
+    }
+
+    /// Export photos into a Year/Month folder structure, pairing Live Photo stills with their .MOV,
+    /// and stamping each file with its capture date.
+    func exportPhotos(_ photos: [DataRecord]) {
+        guard let session, !photos.isEmpty else { return }
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true; panel.canChooseFiles = false; panel.canCreateDirectories = true
+        panel.prompt = "Export"
+        panel.message = "Export \(photos.count) photos/videos into Year/Month folders"
+        guard panel.runModal() == .OK, let dest = panel.url else { return }
+
+        let token = CancelToken()
+        exportToken = token
+        exportProgress = ExportProgress(total: photos.count)
+        let files = photos
+        Task.detached(priority: .userInitiated) { [weak self] in
+            guard let self else { return }
+            var done = 0, ok = 0
+            for rec in files {
+                if token.isCancelled { break }
+                if let file = await MainActor.run(body: { self.mediaFile(for: rec) }) {
+                    let folder: String = {
+                        guard let d = rec.date else { return "Undated" }
+                        let f = DateFormatter(); f.dateFormat = "yyyy/MM"; return f.string(from: d)
+                    }()
+                    let dir = dest.appendingPathComponent(folder, isDirectory: true)
+                    try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+                    let target = dir.appendingPathComponent(file.fileName)
+                    do { try session.extract(file, to: target); ok += 1 } catch {}
+                    // Live Photo motion component (same basename, .MOV)
+                    let base = (file.relativePath as NSString).deletingPathExtension
+                    let mov = await MainActor.run(body: { self.file(pathSuffix: base + ".MOV") ?? self.file(pathSuffix: base + ".mov") })
+                    if let mov { try? session.extract(mov, to: dir.appendingPathComponent(mov.fileName)) }
+                }
+                done += 1
+                let d = done
+                await MainActor.run { self.exportProgress?.completed = d; self.exportProgress?.currentFile = rec.title }
+            }
+            let okc = ok
+            await MainActor.run {
+                self.exportProgress = nil
+                self.exportResultMessage = "Exported \(okc) of \(files.count) photos/videos to \(dest.path)."
+                NSWorkspace.shared.activateFileViewerSelecting([dest])
+            }
+        }
+    }
+
     func exportContacts() {
         guard !contacts.isEmpty else { return }
         let panel = NSSavePanel()
@@ -545,13 +671,28 @@ final class AppModel: ObservableObject {
 
     /// Export the current data viewer's records to CSV.
     func exportRecords(kind: DataKind) {
-        guard !records.isEmpty else { return }
+        let base = filteredRecords
+        let rows = recordSelection.isEmpty ? base : base.filter { recordSelection.contains($0.id) }
+        guard !rows.isEmpty else { return }
         let panel = NSSavePanel()
-        panel.nameFieldStringValue = "\(kind.title).csv"
-        panel.allowedContentTypes = [.commaSeparatedText]
-        panel.message = "Export \(records.count) \(kind.title.lowercased()) rows as CSV"
+        // Offer the natural format for the data type, plus CSV.
+        switch kind {
+        case .calendar: panel.nameFieldStringValue = "Calendar.ics"; panel.allowedContentTypes = [.init(filenameExtension: "ics")!, .commaSeparatedText]
+        case .notes: panel.nameFieldStringValue = "Notes.md"; panel.allowedContentTypes = [.init(filenameExtension: "md")!, .commaSeparatedText]
+        case .safariBookmarks: panel.nameFieldStringValue = "Bookmarks.html"; panel.allowedContentTypes = [.html, .commaSeparatedText]
+        default: panel.nameFieldStringValue = "\(kind.title).csv"; panel.allowedContentTypes = [.commaSeparatedText]
+        }
+        panel.message = "Export \(rows.count) \(kind.title.lowercased()) rows"
         guard panel.runModal() == .OK, let url = panel.url else { return }
-        do { try DataRecord.csv(records).write(to: url, atomically: true, encoding: .utf8)
+        let ext = url.pathExtension.lowercased()
+        let text: String
+        switch ext {
+        case "ics": text = CalendarExport.ics(rows)
+        case "md": text = NotesExport.markdown(rows)
+        case "html", "htm": text = BookmarksExport.html(rows)
+        default: text = DataRecord.csv(rows)
+        }
+        do { try text.write(to: url, atomically: true, encoding: .utf8)
             NSWorkspace.shared.activateFileViewerSelecting([url])
         } catch { alertMessage = error.localizedDescription }
     }
@@ -579,12 +720,53 @@ final class AppModel: ObservableObject {
     func exportConversation(_ conversation: Conversation) {
         let panel = NSSavePanel()
         let safe = conversation.name.replacingOccurrences(of: "/", with: "-")
-        panel.nameFieldStringValue = "Messages - \(safe).txt"
-        panel.allowedContentTypes = [.plainText]
+        panel.nameFieldStringValue = "Messages - \(safe).html"
+        panel.allowedContentTypes = [.html, .plainText]
+        panel.message = "Export as a formatted HTML transcript (with images) or plain text"
         guard panel.runModal() == .OK, let url = panel.url else { return }
-        do { try MessagesStore.transcript(conversation).write(to: url, atomically: true, encoding: .utf8)
+        let text: String
+        if url.pathExtension.lowercased() == "txt" {
+            text = TranscriptExport.plain(conversation)
+        } else {
+            text = TranscriptExport.html(conversation, imageData: { [weak self] att in self?.attachmentImageData(att) })
+        }
+        do { try text.write(to: url, atomically: true, encoding: .utf8)
             NSWorkspace.shared.activateFileViewerSelecting([url])
         } catch { alertMessage = error.localizedDescription }
+    }
+
+    /// Export every conversation in the active messaging workspace as HTML files in a chosen folder.
+    func exportAllConversations() {
+        let convos = activeConversations
+        guard !convos.isEmpty else { return }
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true; panel.canChooseFiles = false; panel.canCreateDirectories = true
+        panel.prompt = "Export Here"
+        panel.message = "Export \(convos.count) conversations as HTML transcripts"
+        guard panel.runModal() == .OK, let dir = panel.url else { return }
+        var used = Set<String>()
+        var written = 0
+        for c in convos {
+            var name = c.name.replacingOccurrences(of: "/", with: "-").replacingOccurrences(of: ":", with: "-")
+            if name.isEmpty { name = "Conversation \(c.id)" }
+            var candidate = name; var n = 1
+            while used.contains(candidate.lowercased()) { n += 1; candidate = "\(name) \(n)" }
+            used.insert(candidate.lowercased())
+            let html = TranscriptExport.html(c, imageData: { [weak self] att in self?.attachmentImageData(att) })
+            try? html.write(to: dir.appendingPathComponent("\(candidate).html"), atomically: true, encoding: .utf8)
+            written += 1
+        }
+        exportResultMessage = "Exported \(written) conversation transcript\(written == 1 ? "" : "s") to \(dir.path)."
+        NSWorkspace.shared.activateFileViewerSelecting([dir])
+    }
+
+    /// Base64 image data for an attachment, for inline HTML export (images only, size-limited).
+    private func attachmentImageData(_ att: MessageAttachment) -> (mime: String, base64: String)? {
+        guard att.isImage, let session, let file = file(pathSuffix: att.pathSuffix),
+              file.size < 8_000_000, let data = try? session.contents(of: file) else { return nil }
+        let ext = (att.pathSuffix as NSString).pathExtension.lowercased()
+        let mime = att.mime.hasPrefix("image/") ? att.mime : (ext == "png" ? "image/png" : "image/jpeg")
+        return (mime, data.base64EncodedString())
     }
 
     private static func summarise(_ files: [BackupFile]) -> [DomainSummary] {
