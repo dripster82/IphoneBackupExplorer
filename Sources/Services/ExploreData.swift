@@ -35,7 +35,7 @@ enum DataKind: String, CaseIterable, Identifiable, Hashable {
         case .voicemails: return "Voicemail"
         case .calendar: return "Calendar"
         case .reminders: return "Reminders"
-        case .photos: return "Photo Metadata"
+        case .photos: return "Photos"
         case .health: return "Health"
         }
     }
@@ -527,5 +527,39 @@ extension ExploreParser {
         let map: [Int64: String] = [7: "Steps", 8: "Distance", 9: "Resting Energy", 10: "Active Energy",
                                     5: "Heart Rate", 12: "Flights Climbed", 3: "Height", 4: "Body Mass"]
         return map[code] ?? "Health type \(code)"
+    }
+}
+
+/// Lightweight photo metadata keyed by filename, for enriching the file-driven gallery.
+struct PhotoMeta { var date: Date?; var location: String?; var albums: [String]; var favorite: Bool }
+
+extension ExploreParser {
+    /// Build a filename -> metadata map from Photos.sqlite (best-effort; used to enrich real media files).
+    static func photoMetaByFilename(url: URL) -> [String: PhotoMeta] {
+        guard let db = SQLiteReader.open(url), SQLiteReader.tableExists(db, "ZASSET") else { return [:] }
+        defer { sqlite3_close(db) }
+        let albums = photoAlbums(db)
+        let cols = columns(db, "ZASSET")
+        let fn = cols.contains("ZFILENAME") ? "ZFILENAME" : "NULL"
+        let dc = cols.contains("ZDATECREATED") ? "ZDATECREATED" : "NULL"
+        let lat = cols.contains("ZLATITUDE") ? "ZLATITUDE" : "NULL"
+        let lon = cols.contains("ZLONGITUDE") ? "ZLONGITUDE" : "NULL"
+        let fav = cols.contains("ZFAVORITE") ? "ZFAVORITE" : "0"
+        var map: [String: PhotoMeta] = [:]
+        var stmt: OpaquePointer?
+        defer { sqlite3_finalize(stmt) }
+        guard sqlite3_prepare_v2(db, "SELECT Z_PK, \(fn), \(dc), \(lat), \(lon), \(fav) FROM ZASSET", -1, &stmt, nil) == SQLITE_OK else { return [:] }
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            let pk = sqlite3_column_int64(stmt, 0)
+            let filename = SQLiteReader.text(stmt, 1)
+            guard !filename.isEmpty else { continue }
+            let created = appleSeconds(sqlite3_column_double(stmt, 2))
+            let latitude = sqlite3_column_double(stmt, 3), longitude = sqlite3_column_double(stmt, 4)
+            var loc: String? = nil
+            if latitude != 0, longitude != 0, latitude > -90, latitude < 90 { loc = String(format: "%.5f, %.5f", latitude, longitude) }
+            map[filename] = PhotoMeta(date: created, location: loc, albums: albums[pk] ?? [],
+                                      favorite: sqlite3_column_int(stmt, 5) == 1)
+        }
+        return map
     }
 }

@@ -311,6 +311,19 @@ final class AppModel: ObservableObject {
 
     func dataFile(for kind: DataKind) -> BackupFile? { file(pathSuffix: kind.pathSuffix) }
 
+    /// The real photo/video files in the backup (camera roll originals, cloud downloads, edits),
+    /// excluding thumbnail and cache artefacts. This is what the Photos gallery shows.
+    func galleryMediaFiles() -> [BackupFile] {
+        allFiles.filter { f in
+            guard f.isRegularFile, f.domain == "CameraRollDomain" || f.domain == "MediaDomain",
+                  f.category == .photos || f.category == .videos else { return false }
+            let p = f.relativePath
+            if p.contains("/Thumbnails/") || p.hasSuffix(".ithmb") { return false }
+            if p.contains("/Caches/") || p.contains("/Derivatives/") { return false }
+            return true
+        }
+    }
+
     /// Modern Reminders store files (Core Data), spread across several files.
     var reminderStoreFiles: [BackupFile] {
         allFiles.filter { $0.isRegularFile
@@ -325,6 +338,11 @@ final class AppModel: ObservableObject {
             if kind == .reminders {
                 // Reminders come from the modern store, or legacy Calendar.sqlitedb.
                 if !reminderStoreFiles.isEmpty || dataFile(for: .calendar) != nil { kinds.append(kind) }
+                continue
+            }
+            if kind == .photos {
+                // Show Photos when real media files exist (independent of the metadata DB).
+                if !galleryMediaFiles().isEmpty { kinds.append(kind) }
                 continue
             }
             guard dataFile(for: kind) != nil else { continue }
@@ -366,6 +384,43 @@ final class AppModel: ObservableObject {
         }
         records = []
         guard let session else { return }
+
+        // Photos: drive the gallery from the ACTUAL media files in the backup (not metadata rows,
+        // which include iCloud-only assets that aren't present). Enrich by filename where possible.
+        if kind == .photos {
+            let mediaFiles = galleryMediaFiles()
+            let metaFile = dataFile(for: .photos)
+            isLoadingData = true
+            dataError = nil
+            Task {
+                let recs = await Task.detached(priority: .userInitiated) { () -> [DataRecord] in
+                    var meta: [String: PhotoMeta] = [:]
+                    if let metaFile, let url = try? session.materialise(metaFile) {
+                        meta = ExploreParser.photoMetaByFilename(url: url)
+                    }
+                    return mediaFiles.map { f -> DataRecord in
+                        let m = meta[f.fileName]
+                        let date = m?.date ?? f.modified
+                        var fields: [DataRecord.Field] = [.init(label: "File", value: f.fileName),
+                                                          .init(label: "Created", value: ExploreParser.dateStr(date))]
+                        if let loc = m?.location { fields.append(.init(label: "Location", value: loc)) }
+                        if m?.favorite == true { fields.append(.init(label: "Favorite", value: "Yes")) }
+                        if let albums = m?.albums, !albums.isEmpty { fields.append(.init(label: "Album", value: albums.joined(separator: ", "))) }
+                        fields.append(.init(label: "Size", value: AppModel.formatSize(f.size)))
+                        return DataRecord(id: "media-\(f.id)", title: f.fileName,
+                                          subtitle: [ExploreParser.dateStr(date), m?.location].compactMap { $0 }.joined(separator: " · "),
+                                          date: date, fields: fields, body: nil,
+                                          mediaPathSuffix: f.relativePath, mediaDomain: f.domain)
+                    }.sorted { ($0.date ?? .distantPast) > ($1.date ?? .distantPast) }
+                }.value
+                isLoadingData = false
+                guard workspace == .data(kind) else { return }
+                recordCache[kind] = recs
+                records = recs
+                selectedRecordID = recs.first?.id
+            }
+            return
+        }
 
         // Modern Reminders: merge rows from every reminders store file.
         if kind == .reminders, !reminderStoreFiles.isEmpty {
@@ -934,7 +989,7 @@ final class AppModel: ObservableObject {
 
     // MARK: Helpers
 
-    static func formatSize(_ bytes: Int64) -> String {
+    nonisolated static func formatSize(_ bytes: Int64) -> String {
         ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
     }
 }

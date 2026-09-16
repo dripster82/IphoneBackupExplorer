@@ -15,7 +15,7 @@ struct PhotosGalleryView: View {
             } else if let err = model.dataError {
                 ContentUnavailableView("Can't Read Photos", systemImage: "photo.badge.exclamationmark", description: Text(err))
             } else if model.records.isEmpty {
-                ContentUnavailableView("No Photos", systemImage: "photo.stack", description: Text("This backup has no photo library metadata."))
+                ContentUnavailableView("No Photos", systemImage: "photo.stack", description: Text("This backup contains no photos or videos."))
             } else {
                 let photos = model.filteredPhotos
                 let groups = groupByDay(photos)
@@ -106,24 +106,30 @@ private struct PhotoCell: View {
     @State private var image: NSImage?
 
     var body: some View {
-        ZStack(alignment: .topTrailing) {
-            RoundedRectangle(cornerRadius: 6).fill(Color.secondary.opacity(0.12))
-            if let image {
-                Image(nsImage: image).resizable().aspectRatio(contentMode: .fill)
-            } else {
-                Image(systemName: isVideo ? "film" : "photo").font(.title2).foregroundStyle(.tertiary)
+        // A fixed square cell. The image fills it via an overlay so a wide/tall photo can never
+        // push the cell's layout size and overlap its neighbours; it's clipped to the square.
+        RoundedRectangle(cornerRadius: 6)
+            .fill(Color.secondary.opacity(0.12))
+            .aspectRatio(1, contentMode: .fit)
+            .overlay {
+                if let image {
+                    Image(nsImage: image).resizable().scaledToFill()
+                } else {
+                    Image(systemName: isVideo ? "film" : "photo").font(.title2).foregroundStyle(.tertiary)
+                }
             }
-            if record.fields.contains(where: { $0.label == "Favorite" }) {
-                Image(systemName: "heart.fill").foregroundStyle(.pink).padding(4).font(.caption)
+            .overlay(alignment: .topTrailing) {
+                if record.fields.contains(where: { $0.label == "Favorite" }) {
+                    Image(systemName: "heart.fill").foregroundStyle(.pink).padding(4).font(.caption)
+                }
             }
-            if isVideo {
-                VStack { Spacer(); HStack { Image(systemName: "play.circle.fill").foregroundStyle(.white).shadow(radius: 2); Spacer() } }.padding(4)
+            .overlay(alignment: .bottomLeading) {
+                if isVideo { Image(systemName: "play.circle.fill").foregroundStyle(.white).shadow(radius: 2).padding(4) }
             }
-        }
-        .aspectRatio(1, contentMode: .fit)
-        .clipShape(RoundedRectangle(cornerRadius: 6))
-        .overlay(RoundedRectangle(cornerRadius: 6).stroke(isSelected ? Color.accentColor : .clear, lineWidth: 3))
-        .task(id: record.id) { await load() }
+            .clipShape(RoundedRectangle(cornerRadius: 6))
+            .overlay(RoundedRectangle(cornerRadius: 6).stroke(isSelected ? Color.accentColor : .clear, lineWidth: 3))
+            .contentShape(Rectangle())
+            .task(id: record.id) { await load() }
     }
 
     private var isVideo: Bool {
