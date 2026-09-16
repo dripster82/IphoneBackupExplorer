@@ -63,8 +63,9 @@ enum SelfTest {
                 if !withAlbum.isEmpty {
                     print("  records in albums: \(withAlbum.count); sample: \(withAlbum.first!.title) → \(withAlbum.first!.fields.first { $0.label == "Album" }!.value)")
                 }
-                for r in recs.prefix(8) {
-                    print("  • \(r.title) | \(r.subtitle) | media=\(r.mediaPathSuffix ?? "-")")
+                for r in recs.prefix(12) {
+                    print("  • \(r.title) | \(r.subtitle)")
+                    for f in r.fields where !["Username","Type"].contains(f.label) { print("        \(f.label): \(f.value)") }
                 }
                 exit(0)
             } catch { print("ERROR: \(error.localizedDescription)"); exit(1) }

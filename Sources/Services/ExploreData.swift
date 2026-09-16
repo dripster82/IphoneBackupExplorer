@@ -577,32 +577,111 @@ extension ExploreParser {
 }
 
 extension ExploreParser {
-    /// Configured accounts (Accounts3.sqlite): username + account type.
+    /// Decode an NSKeyedArchiver-wrapped (or plain) property value to a readable string.
+    static func decodeArchived(_ data: Data) -> String? {
+        if data.starts(with: Data("bplist".utf8)) {
+            if let un = try? NSKeyedUnarchiver(forReadingFrom: data) {
+                un.requiresSecureCoding = false
+                if let obj = un.decodeObject(forKey: "root") {
+                    if let s = obj as? String { return s }
+                    if let n = obj as? NSNumber { return n.stringValue }
+                    if !(obj is NSNull) { return "\(obj)" }
+                }
+            }
+            if let obj = try? PropertyListSerialization.propertyList(from: data, options: [], format: nil) {
+                if let s = obj as? String { return s }
+                if let n = obj as? NSNumber { return n.stringValue }
+            }
+            return nil
+        }
+        return String(data: data, encoding: .utf8)
+    }
+
+    /// Interesting mail/account settings keys → friendly label.
+    private static let accountSettingKeys: [(String, String)] = [
+        ("Hostname", "Server"), ("DAAccountHost", "Server"), ("PortNumber", "Port"), ("DAAccountPort", "Port"),
+        ("ACUIDisplayUsername", "Login"), ("uid", "Login"), ("username", "Login"),
+        ("SSLEnabled", "SSL"), ("DAAccountUseSSL", "SSL"), ("ShouldUseAuthentication", "Uses auth"),
+        ("Protocol", "Protocol"), ("DAAccountScheme", "Scheme"), ("AuthenticationScheme", "Auth"),
+        ("ACPropertyFullName", "Full name"), ("fullname", "Full name"), ("EmailAddress", "Email"),
+    ]
+
+    /// Configured accounts (Accounts3.sqlite): username, type, and decoded mail/server settings.
     static func accounts(_ db: OpaquePointer) throws -> [DataRecord] {
         guard SQLiteReader.tableExists(db, "ZACCOUNT") else { throw BackupError.sqlite("no accounts") }
+
+        // Per-account settings from ZACCOUNTPROPERTY (ZOWNER -> account Z_PK).
+        var props: [Int64: [String: String]] = [:]
+        if SQLiteReader.tableExists(db, "ZACCOUNTPROPERTY") {
+            var pstmt: OpaquePointer?
+            if sqlite3_prepare_v2(db, "SELECT ZOWNER, ZKEY, ZVALUE FROM ZACCOUNTPROPERTY", -1, &pstmt, nil) == SQLITE_OK {
+                while sqlite3_step(pstmt) == SQLITE_ROW {
+                    let owner = sqlite3_column_int64(pstmt, 0)
+                    let key = SQLiteReader.text(pstmt, 1)
+                    guard accountSettingKeys.contains(where: { $0.0 == key }) else { continue }
+                    var value = ""
+                    if let blob = sqlite3_column_blob(pstmt, 2) {
+                        value = decodeArchived(Data(bytes: blob, count: Int(sqlite3_column_bytes(pstmt, 2)))) ?? ""
+                    } else { value = SQLiteReader.text(pstmt, 2) }
+                    if !value.isEmpty { props[owner, default: [:]][key] = value }
+                }
+            }
+            sqlite3_finalize(pstmt)
+        }
+
+        // Load all accounts (incl. child SMTP/outgoing accounts) so we can attach their settings.
+        struct Acct { var pk: Int64; var user: String; var desc: String; var type: String; var parent: Int64; var date: Date? }
         let cols = columns(db, "ZACCOUNT")
         let hasType = SQLiteReader.tableExists(db, "ZACCOUNTTYPE")
-        let desc = cols.contains("ZACCOUNTDESCRIPTION") ? "a.ZACCOUNTDESCRIPTION" : "NULL"
+        let descCol = cols.contains("ZACCOUNTDESCRIPTION") ? "a.ZACCOUNTDESCRIPTION" : "NULL"
         let dateCol = cols.contains("ZDATE") ? "a.ZDATE" : "NULL"
-        let sql = hasType
-            ? "SELECT a.ZUSERNAME, \(desc), t.ZACCOUNTTYPEDESCRIPTION, \(dateCol) FROM ZACCOUNT a LEFT JOIN ZACCOUNTTYPE t ON t.Z_PK = a.ZACCOUNTTYPE WHERE a.ZUSERNAME IS NOT NULL AND a.ZUSERNAME <> ''"
-            : "SELECT a.ZUSERNAME, \(desc), NULL, \(dateCol) FROM ZACCOUNT a WHERE a.ZUSERNAME IS NOT NULL AND a.ZUSERNAME <> ''"
+        let parentCol = cols.contains("ZPARENTACCOUNT") ? "a.ZPARENTACCOUNT" : "0"
+        let typeExpr = hasType ? "t.ZACCOUNTTYPEDESCRIPTION" : "NULL"
+        let join = hasType ? "LEFT JOIN ZACCOUNTTYPE t ON t.Z_PK = a.ZACCOUNTTYPE" : ""
+        let sql = "SELECT a.Z_PK, a.ZUSERNAME, \(descCol), \(typeExpr), \(dateCol), \(parentCol) FROM ZACCOUNT a \(join)"
         var stmt: OpaquePointer?
         defer { sqlite3_finalize(stmt) }
         guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { throw BackupError.sqlite(String(cString: sqlite3_errmsg(db))) }
-        var out: [DataRecord] = []; var seen = Set<String>(); var i = 0
+        var all: [Acct] = []
         while sqlite3_step(stmt) == SQLITE_ROW {
-            let user = SQLiteReader.text(stmt, 0)
-            let description = SQLiteReader.text(stmt, 1)
-            let type = SQLiteReader.text(stmt, 2)
-            let date = appleSeconds(sqlite3_column_double(stmt, 3))
-            let kind = type.isEmpty ? (description.isEmpty ? "Account" : description) : type
-            let dedupe = "\(user.lowercased())|\(kind.lowercased())"
+            all.append(Acct(pk: sqlite3_column_int64(stmt, 0), user: SQLiteReader.text(stmt, 1),
+                            desc: SQLiteReader.text(stmt, 2), type: SQLiteReader.text(stmt, 3),
+                            parent: sqlite3_column_int64(stmt, 5), date: appleSeconds(sqlite3_column_double(stmt, 4))))
+        }
+        var childrenOf: [Int64: [Acct]] = [:]
+        for a in all where a.parent != 0 { childrenOf[a.parent, default: []].append(a) }
+
+        func settingsFields(_ a: Acct, prefix: String) -> [DataRecord.Field] {
+            guard let s = props[a.pk] else { return [] }
+            var fields: [DataRecord.Field] = []; var added = Set<String>()
+            for (key, label) in accountSettingKeys {
+                guard let v = s[key] else { continue }
+                let full = prefix.isEmpty ? label : "\(prefix) \(label)"
+                if added.contains(full) { continue }; added.insert(full)
+                let shown = (label == "SSL" || label == "Uses auth") ? (v.lowercased() == "yes" || v == "1" ? "Yes" : "No") : v
+                fields.append(.init(label: full, value: shown))
+            }
+            return fields
+        }
+
+        var out: [DataRecord] = []; var seen = Set<String>()
+        for a in all where !a.user.isEmpty {
+            let kind = a.type.isEmpty ? (a.desc.isEmpty ? "Account" : a.desc) : a.type
+            var fields: [DataRecord.Field] = [.init(label: "Username", value: a.user), .init(label: "Type", value: kind)]
+            if !a.desc.isEmpty, a.desc != a.user { fields.append(.init(label: "Description", value: a.desc)) }
+            // Incoming/own settings, then each child (e.g. SMTP outgoing) prefixed by its type.
+            fields += settingsFields(a, prefix: "")
+            for child in childrenOf[a.pk] ?? [] {
+                let childPrefix = child.type.isEmpty ? "Outgoing" : child.type
+                fields += settingsFields(child, prefix: childPrefix)
+            }
+            if a.date != nil { fields.append(.init(label: "Added", value: dateStr(a.date))) }
+            let server = props[a.pk]?["Hostname"] ?? props[a.pk]?["DAAccountHost"]
+            let dedupe = "\(a.user.lowercased())|\(kind.lowercased())|\(server ?? "")"
             if seen.contains(dedupe) { continue }; seen.insert(dedupe)
-            var fields: [DataRecord.Field] = [.init(label: "Username", value: user), .init(label: "Type", value: kind)]
-            if !description.isEmpty, description != user { fields.append(.init(label: "Description", value: description)) }
-            if date != nil { fields.append(.init(label: "Added", value: dateStr(date))) }
-            out.append(DataRecord(id: "acct-\(i)", title: user, subtitle: kind, date: date, fields: fields)); i += 1
+            out.append(DataRecord(id: "acct-\(a.pk)", title: a.user,
+                                  subtitle: [kind, server].compactMap { $0 }.joined(separator: " · "),
+                                  date: a.date, fields: fields))
         }
         return out.sorted { $0.subtitle.localizedCaseInsensitiveCompare($1.subtitle) == .orderedAscending }
     }
