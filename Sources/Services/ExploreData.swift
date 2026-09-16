@@ -23,7 +23,7 @@ struct DataRecord: Identifiable, Hashable {
 
 /// The kinds of parsed-data viewers beyond Files/Contacts/Messages.
 enum DataKind: String, CaseIterable, Identifiable, Hashable {
-    case calls, callsLegacy, safariHistory, safariBookmarks, notes, voicemails, calendar, reminders, photos, health, wifi
+    case calls, callsLegacy, safariHistory, safariBookmarks, notes, voicemails, calendar, reminders, photos, health, wifi, accounts, appPermissions
     var id: String { rawValue }
 
     var title: String {
@@ -38,6 +38,8 @@ enum DataKind: String, CaseIterable, Identifiable, Hashable {
         case .photos: return "Photos"
         case .health: return "Health"
         case .wifi: return "Wi-Fi Networks"
+        case .accounts: return "Accounts"
+        case .appPermissions: return "App Permissions"
         }
     }
     var icon: String {
@@ -52,6 +54,8 @@ enum DataKind: String, CaseIterable, Identifiable, Hashable {
         case .photos: return "photo.stack"
         case .health: return "heart.text.square"
         case .wifi: return "wifi"
+        case .accounts: return "at"
+        case .appPermissions: return "hand.raised"
         }
     }
     /// Whether to also load contacts, to resolve phone numbers to names.
@@ -71,6 +75,8 @@ enum DataKind: String, CaseIterable, Identifiable, Hashable {
         case .photos: return "Photos.sqlite"
         case .health: return "healthdb_secure.sqlite"
         case .wifi: return "com.apple.wifi-networks.plist"
+        case .accounts: return "Accounts/Accounts3.sqlite"
+        case .appPermissions: return "TCC/TCC.db"
         }
     }
 }
@@ -126,6 +132,8 @@ enum ExploreParser {
         case .photos:         return try photos(db)
         case .health:         return try health(db)
         case .wifi:           return []
+        case .accounts:       return try accounts(db)
+        case .appPermissions: return try appPermissions(db)
         }
     }
 
@@ -565,5 +573,72 @@ extension ExploreParser {
                                       favorite: sqlite3_column_int(stmt, 5) == 1)
         }
         return map
+    }
+}
+
+extension ExploreParser {
+    /// Configured accounts (Accounts3.sqlite): username + account type.
+    static func accounts(_ db: OpaquePointer) throws -> [DataRecord] {
+        guard SQLiteReader.tableExists(db, "ZACCOUNT") else { throw BackupError.sqlite("no accounts") }
+        let cols = columns(db, "ZACCOUNT")
+        let hasType = SQLiteReader.tableExists(db, "ZACCOUNTTYPE")
+        let desc = cols.contains("ZACCOUNTDESCRIPTION") ? "a.ZACCOUNTDESCRIPTION" : "NULL"
+        let dateCol = cols.contains("ZDATE") ? "a.ZDATE" : "NULL"
+        let sql = hasType
+            ? "SELECT a.ZUSERNAME, \(desc), t.ZACCOUNTTYPEDESCRIPTION, \(dateCol) FROM ZACCOUNT a LEFT JOIN ZACCOUNTTYPE t ON t.Z_PK = a.ZACCOUNTTYPE WHERE a.ZUSERNAME IS NOT NULL AND a.ZUSERNAME <> ''"
+            : "SELECT a.ZUSERNAME, \(desc), NULL, \(dateCol) FROM ZACCOUNT a WHERE a.ZUSERNAME IS NOT NULL AND a.ZUSERNAME <> ''"
+        var stmt: OpaquePointer?
+        defer { sqlite3_finalize(stmt) }
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { throw BackupError.sqlite(String(cString: sqlite3_errmsg(db))) }
+        var out: [DataRecord] = []; var seen = Set<String>(); var i = 0
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            let user = SQLiteReader.text(stmt, 0)
+            let description = SQLiteReader.text(stmt, 1)
+            let type = SQLiteReader.text(stmt, 2)
+            let date = appleSeconds(sqlite3_column_double(stmt, 3))
+            let kind = type.isEmpty ? (description.isEmpty ? "Account" : description) : type
+            let dedupe = "\(user.lowercased())|\(kind.lowercased())"
+            if seen.contains(dedupe) { continue }; seen.insert(dedupe)
+            var fields: [DataRecord.Field] = [.init(label: "Username", value: user), .init(label: "Type", value: kind)]
+            if !description.isEmpty, description != user { fields.append(.init(label: "Description", value: description)) }
+            if date != nil { fields.append(.init(label: "Added", value: dateStr(date))) }
+            out.append(DataRecord(id: "acct-\(i)", title: user, subtitle: kind, date: date, fields: fields)); i += 1
+        }
+        return out.sorted { $0.subtitle.localizedCaseInsensitiveCompare($1.subtitle) == .orderedAscending }
+    }
+
+    /// App privacy permissions (TCC.db): which app was granted which capability.
+    static func appPermissions(_ db: OpaquePointer) throws -> [DataRecord] {
+        guard SQLiteReader.tableExists(db, "access") else { throw BackupError.sqlite("no TCC access table") }
+        let cols = columns(db, "access")
+        let valueCol = cols.contains("auth_value") ? "auth_value" : (cols.contains("allowed") ? "allowed" : "0")
+        let modCol = cols.contains("last_modified") ? "last_modified" : "0"
+        let sql = "SELECT service, client, \(valueCol), \(modCol) FROM access ORDER BY client"
+        var stmt: OpaquePointer?
+        defer { sqlite3_finalize(stmt) }
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { throw BackupError.sqlite(String(cString: sqlite3_errmsg(db))) }
+        var out: [DataRecord] = []; var i = 0
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            let service = SQLiteReader.text(stmt, 0)
+            let client = SQLiteReader.text(stmt, 1)
+            let value = sqlite3_column_int(stmt, 2)
+            let date = unixSeconds(sqlite3_column_double(stmt, 3))
+            let status = value == 2 ? "Allowed" : (value == 3 ? "Limited" : (value == 0 ? "Denied" : "Set"))
+            out.append(DataRecord(id: "tcc-\(i)", title: tccName(service),
+                                  subtitle: "\(client) · \(status)", date: date,
+                                  fields: [.init(label: "App", value: client), .init(label: "Permission", value: tccName(service)),
+                                           .init(label: "Status", value: status), .init(label: "Modified", value: dateStr(date))])); i += 1
+        }
+        return out
+    }
+    static func tccName(_ service: String) -> String {
+        let map: [String: String] = [
+            "kTCCServiceCamera": "Camera", "kTCCServiceMicrophone": "Microphone", "kTCCServiceAddressBook": "Contacts",
+            "kTCCServicePhotos": "Photos", "kTCCServicePhotosAdd": "Add to Photos", "kTCCServiceCalendar": "Calendar",
+            "kTCCServiceReminders": "Reminders", "kTCCServiceMotion": "Motion & Fitness", "kTCCServiceMediaLibrary": "Media Library",
+            "kTCCServiceUbiquity": "iCloud", "kTCCServiceBluetoothAlways": "Bluetooth", "kTCCServiceUserTracking": "Tracking",
+            "kTCCServiceLocation": "Location", "kTCCServiceSpeechRecognition": "Speech Recognition", "kTCCServiceWillow": "Home",
+            "kTCCServiceFocusStatus": "Focus", "kTCCServiceSiri": "Siri", "kTCCServiceLiverpool": "Motion (Health)"]
+        return map[service] ?? service.replacingOccurrences(of: "kTCCService", with: "")
     }
 }
