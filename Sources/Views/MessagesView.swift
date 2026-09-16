@@ -4,13 +4,16 @@ import AppKit
 struct MessagesListView: View {
     @EnvironmentObject var model: AppModel
     var body: some View {
+        let isWhatsApp = model.workspace == .whatsapp
         Group {
-            if model.isLoadingData && model.conversations.isEmpty {
-                ProgressView("Reading Messages…")
+            if model.isLoadingData && model.activeConversations.isEmpty {
+                ProgressView(isWhatsApp ? "Reading WhatsApp…" : "Reading Messages…")
             } else if let err = model.dataError {
                 ContentUnavailableView("Can't Read Messages", systemImage: "bubble.left.and.exclamationmark.bubble.right", description: Text(err))
-            } else if model.conversations.isEmpty {
-                ContentUnavailableView("No Messages", systemImage: "bubble.left.and.bubble.right", description: Text("This backup has no SMS/iMessage history."))
+            } else if model.activeConversations.isEmpty {
+                ContentUnavailableView(isWhatsApp ? "No WhatsApp Chats" : "No Messages",
+                                       systemImage: "bubble.left.and.bubble.right",
+                                       description: Text(isWhatsApp ? "This backup has no WhatsApp history." : "This backup has no SMS/iMessage history."))
             } else {
                 List(selection: $model.selectedConversationID) {
                     ForEach(model.filteredConversations) { convo in
@@ -32,7 +35,7 @@ struct MessagesListView: View {
             }
         }
         .navigationTitle(model.workspace == .whatsapp ? "WhatsApp" : "Messages")
-        .navigationSubtitle(model.conversations.isEmpty ? "" : "\(model.conversations.count) conversations")
+        .navigationSubtitle(model.activeConversations.isEmpty ? "" : "\(model.activeConversations.count) conversations")
         .searchable(text: $model.messageSearch, placement: .toolbar, prompt: "Search conversations")
         .toolbar {
             ToolbarItem {
