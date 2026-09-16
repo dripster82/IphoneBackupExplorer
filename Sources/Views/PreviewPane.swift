@@ -84,6 +84,8 @@ private struct FilePreview: View {
     let session: BackupSession
     @State private var url: URL?
     @State private var text: String?
+    @State private var plistNodes: [PlistNode]?
+    @State private var showRawPlist = false
     @State private var error: String?
     @State private var loading = false
 
@@ -95,6 +97,8 @@ private struct FilePreview: View {
                     ProgressView()
                 } else if let error {
                     ContentUnavailableView("Can't Preview", systemImage: "exclamationmark.triangle", description: Text(error))
+                } else if let plistNodes, !showRawPlist {
+                    PlistTreeView(nodes: plistNodes)
                 } else if let text {
                     ScrollView { Text(text).font(.system(.caption, design: .monospaced)).textSelection(.enabled)
                         .frame(maxWidth: .infinity, alignment: .leading).padding(10) }
@@ -122,6 +126,9 @@ private struct FilePreview: View {
                     ])
                     HStack {
                         Button("Export…") { model.export(files: [file]) }
+                        if plistNodes != nil {
+                            Button(showRawPlist ? "Tree View" : "Raw Text") { showRawPlist.toggle() }
+                        }
                         if let url {
                             Button("Open") { NSWorkspace.shared.open(url) }
                             Button("Quick Look") { QuickLookPanelController.shared.show(url) }
@@ -138,19 +145,24 @@ private struct FilePreview: View {
     }
 
     private func load() async {
-        url = nil; text = nil; error = nil; loading = true
+        url = nil; text = nil; plistNodes = nil; showRawPlist = false; error = nil; loading = true
         defer { loading = false }
         guard file.isRegularFile else { error = "Directories have no content."; return }
         let f = file, s = session
         do {
             let ext = f.fileExtension
-            if ["plist", "json", "txt", "xml", "html", "csv", "md", "vcf", "ics", "strings", "log"].contains(ext), f.size < 2_000_000 {
+            if ["plist", "json", "txt", "xml", "html", "csv", "md", "vcf", "ics", "strings", "log"].contains(ext), f.size < 5_000_000 {
                 let data = try await Task.detached { try s.contents(of: f) }.value
+                if ext == "plist" || data.starts(with: Data("bplist".utf8)),
+                   let obj = try? PropertyListSerialization.propertyList(from: data, options: [], format: nil) {
+                    plistNodes = PlistNode.root(obj)
+                }
                 text = PreviewFormatter.text(from: data, extension: ext)
                 return
             }
-            if ext.isEmpty, f.size < 200_000, let data = try? await Task.detached(operation: { try s.contents(of: f) }).value,
+            if ext.isEmpty, f.size < 500_000, let data = try? await Task.detached(operation: { try s.contents(of: f) }).value,
                data.starts(with: Data("bplist".utf8)) {
+                if let obj = try? PropertyListSerialization.propertyList(from: data, options: [], format: nil) { plistNodes = PlistNode.root(obj) }
                 text = PreviewFormatter.text(from: data, extension: "plist"); return
             }
             url = try await Task.detached(priority: .userInitiated) { try s.materialise(f) }.value

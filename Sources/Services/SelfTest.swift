@@ -25,6 +25,13 @@ enum SelfTest {
                 exit(0)
             }
         }
+        if let list = defaults.string(forKey: "parseWifi"), !list.isEmpty {
+            let urls = list.split(separator: ",").map { URL(fileURLWithPath: String($0)) }
+            let recs = WiFiStore.networks(from: urls)
+            print("wifi networks: \(recs.count)")
+            for r in recs.prefix(15) { print("  • \(r.title) | \(r.subtitle)") }
+            exit(0)
+        }
         if let folder = defaults.string(forKey: "listExplore"), !folder.isEmpty {
             do {
                 let device = try BackupLocator.load(backupFolder: URL(fileURLWithPath: folder))

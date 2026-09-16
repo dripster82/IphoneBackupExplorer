@@ -23,7 +23,7 @@ struct DataRecord: Identifiable, Hashable {
 
 /// The kinds of parsed-data viewers beyond Files/Contacts/Messages.
 enum DataKind: String, CaseIterable, Identifiable, Hashable {
-    case calls, callsLegacy, safariHistory, safariBookmarks, notes, voicemails, calendar, reminders, photos, health
+    case calls, callsLegacy, safariHistory, safariBookmarks, notes, voicemails, calendar, reminders, photos, health, wifi
     var id: String { rawValue }
 
     var title: String {
@@ -37,6 +37,7 @@ enum DataKind: String, CaseIterable, Identifiable, Hashable {
         case .reminders: return "Reminders"
         case .photos: return "Photos"
         case .health: return "Health"
+        case .wifi: return "Wi-Fi Networks"
         }
     }
     var icon: String {
@@ -50,6 +51,7 @@ enum DataKind: String, CaseIterable, Identifiable, Hashable {
         case .reminders: return "checklist"
         case .photos: return "photo.stack"
         case .health: return "heart.text.square"
+        case .wifi: return "wifi"
         }
     }
     /// Whether to also load contacts, to resolve phone numbers to names.
@@ -68,6 +70,7 @@ enum DataKind: String, CaseIterable, Identifiable, Hashable {
         case .reminders: return "Calendar.sqlitedb"
         case .photos: return "Photos.sqlite"
         case .health: return "healthdb_secure.sqlite"
+        case .wifi: return "com.apple.wifi-networks.plist"
         }
     }
 }
@@ -122,6 +125,7 @@ enum ExploreParser {
         case .notes:          return try notes(db)
         case .photos:         return try photos(db)
         case .health:         return try health(db)
+        case .wifi:           return []
         }
     }
 

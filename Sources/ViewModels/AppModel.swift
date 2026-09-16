@@ -311,6 +311,16 @@ final class AppModel: ObservableObject {
 
     func dataFile(for kind: DataKind) -> BackupFile? { file(pathSuffix: kind.pathSuffix) }
 
+    /// The various com.apple.wifi*.plist files that hold known/joined networks.
+    var wifiFiles: [BackupFile] {
+        allFiles.filter { f in
+            guard f.isRegularFile, f.relativePath.hasSuffix(".plist") else { return false }
+            let n = (f.relativePath as NSString).lastPathComponent
+            return n == "com.apple.wifi-networks.plist" || n == "com.apple.wifi.known-networks.plist"
+                || n == "com.apple.wifi.plist" || n == "com.apple.wifi-private-mac-networks.plist"
+        }
+    }
+
     /// The real photo/video files in the backup (camera roll originals, cloud downloads, edits),
     /// excluding thumbnail and cache artefacts. This is what the Photos gallery shows.
     func galleryMediaFiles() -> [BackupFile] {
@@ -343,6 +353,10 @@ final class AppModel: ObservableObject {
             if kind == .photos {
                 // Show Photos when real media files exist (independent of the metadata DB).
                 if !galleryMediaFiles().isEmpty { kinds.append(kind) }
+                continue
+            }
+            if kind == .wifi {
+                if !wifiFiles.isEmpty { kinds.append(kind) }
                 continue
             }
             guard dataFile(for: kind) != nil else { continue }
@@ -418,6 +432,22 @@ final class AppModel: ObservableObject {
                 recordCache[kind] = recs
                 records = recs
                 selectedRecordID = recs.first?.id
+            }
+            return
+        }
+
+        // Wi-Fi: merge networks across the various wifi plist files.
+        if kind == .wifi {
+            let files = wifiFiles
+            isLoadingData = true; dataError = nil
+            Task {
+                let recs = await Task.detached(priority: .userInitiated) { () -> [DataRecord] in
+                    let urls = files.compactMap { try? session.materialise($0) }
+                    return WiFiStore.networks(from: urls)
+                }.value
+                isLoadingData = false
+                guard workspace == .data(kind) else { return }
+                recordCache[kind] = recs; records = recs; selectedRecordID = recs.first?.id
             }
             return
         }
