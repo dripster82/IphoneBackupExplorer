@@ -11,13 +11,15 @@ STAGE="$(mktemp -d)"; trap 'rm -rf "$STAGE"' EXIT
 cp -R "$APP" "$STAGE/"; ln -s /Applications "$STAGE/Applications"
 rm -f "$DMG"
 echo "==> creating $DMG"
-# Retry: on-access scanners (e.g. Sophos) can briefly lock the freshly copied .app,
-# making hdiutil fail with "Resource busy".
-for attempt in 1 2 3 4 5; do
-  if hdiutil create -volname "$VOLNAME" -srcfolder "$STAGE" -ov -format UDZO "$DMG" >/dev/null 2>/tmp/ibe-hdiutil.err; then break; fi
-  echo "   hdiutil busy (attempt $attempt), retrying…"; sleep 5
-  [[ $attempt == 5 ]] && { echo "✗ hdiutil create failed: $(tail -1 /tmp/ibe-hdiutil.err)"; exit 1; }
+# Build the image in a temp location (avoids on-access scanners locking files under the repo),
+# then move it into place. Retry: scanners (e.g. Sophos) can briefly hold "Resource busy".
+TMPDMG="$(mktemp -u).dmg"
+for attempt in $(seq 1 8); do
+  if hdiutil create -volname "$VOLNAME" -srcfolder "$STAGE" -ov -format UDZO "$TMPDMG" >/dev/null 2>/tmp/ibe-hdiutil.err; then break; fi
+  echo "   hdiutil busy (attempt $attempt), retrying…"; sleep 8
+  [[ $attempt == 8 ]] && { echo "✗ hdiutil create failed: $(tail -1 /tmp/ibe-hdiutil.err)"; exit 1; }
 done
+mv "$TMPDMG" "$DMG"
 if [[ -n "${CODESIGN_IDENTITY:-}" ]]; then
   codesign --force --sign "$CODESIGN_IDENTITY" "$DMG"; echo "==> signed dmg"
 fi
