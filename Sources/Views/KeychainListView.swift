@@ -30,13 +30,7 @@ struct KeychainListView: View {
                             Section(isExpanded: expansion(info.key)) {
                                 ForEach(rows) { record in row(record) }
                             } header: {
-                                Label("\(info.title)  (\(rows.count))", systemImage: info.icon)
-                                    .font(.callout.weight(.semibold))
-                                    .contentShape(Rectangle())
-                                    .onTapGesture {
-                                        if collapsed.contains(info.key) { collapsed.remove(info.key) }
-                                        else { collapsed.insert(info.key) }
-                                    }
+                                header(info, rows: rows)
                             }
                         }
                     }
@@ -53,12 +47,42 @@ struct KeychainListView: View {
                     Toggle("Sort by name", isOn: $model.dataSortByName)
                     Divider()
                     Toggle("Show system items (\(model.keychainSystemCount))", isOn: $model.keychainShowSystem)
+                    Divider()
+                    Button("Select All (\(model.filteredRecords.count))") { model.selectAllVisibleRecords() }
+                    Button("Deselect All") { model.recordSelection = [] }
+                        .disabled(model.recordSelection.isEmpty)
                 } label: { Label("Options", systemImage: "slider.horizontal.3") }
-                Button { model.exportRecords(kind: .keychain) } label: { Label("Export", systemImage: "square.and.arrow.up") }
+                Menu {
+                    Button("Export Selected (\(model.recordSelection.count))") { model.exportRecords(kind: .keychain) }
+                        .disabled(model.recordSelection.isEmpty)
+                    Button("Export All Shown (\(model.filteredRecords.count))") {
+                        model.exportRecords(kind: .keychain, rows: model.filteredRecords)
+                    }
+                    Divider()
+                    ForEach(Self.groupInfo, id: \.key) { info in
+                        let rows = model.filteredRecords.filter { $0.group == info.key }
+                        if !rows.isEmpty {
+                            Button("Export \(info.title) (\(rows.count))") { model.exportRecords(kind: .keychain, rows: rows) }
+                        }
+                    }
+                } label: { Label("Export", systemImage: "square.and.arrow.up") }
                     .disabled(model.records.isEmpty)
-                    .help("Export shown rows")
+                    .help("Export selected, all, or a whole section")
             }
         }
+    }
+
+    private func header(_ info: (key: String, title: String, icon: String), rows: [DataRecord]) -> some View {
+        Label("\(info.title)  (\(rows.count))", systemImage: info.icon)
+            .font(.callout.weight(.semibold))
+            .contentShape(Rectangle())
+            .onTapGesture {
+                if collapsed.contains(info.key) { collapsed.remove(info.key) } else { collapsed.insert(info.key) }
+            }
+            .contextMenu {
+                Button("Select All \(info.title) (\(rows.count))") { model.selectRecords(inGroup: info.key) }
+                Button("Export \(info.title)…") { model.exportRecords(kind: .keychain, rows: rows) }
+            }
     }
 
     private func expansion(_ key: String) -> Binding<Bool> {

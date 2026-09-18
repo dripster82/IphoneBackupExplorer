@@ -798,9 +798,18 @@ final class AppModel: ObservableObject {
     }
 
     /// Export the current data viewer's records to CSV.
-    func exportRecords(kind: DataKind) {
+    /// Select every currently-visible record (respecting search + section filters).
+    func selectAllVisibleRecords() { recordSelection = Set(filteredRecords.map { $0.id }) }
+
+    /// Add all records in a keychain group ("website"/"wifi"/"application"/"system") to the selection.
+    func selectRecords(inGroup group: String) {
+        let ids = filteredRecords.filter { $0.group == group }.map { $0.id }
+        recordSelection.formUnion(ids)
+    }
+
+    func exportRecords(kind: DataKind, rows explicitRows: [DataRecord]? = nil) {
         let base = filteredRecords
-        let rows = recordSelection.isEmpty ? base : base.filter { recordSelection.contains($0.id) }
+        let rows = explicitRows ?? (recordSelection.isEmpty ? base : base.filter { recordSelection.contains($0.id) })
         guard !rows.isEmpty else { return }
         let panel = NSSavePanel()
         // Offer the natural format for the data type, plus CSV.
