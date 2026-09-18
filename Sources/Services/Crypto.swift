@@ -133,32 +133,62 @@ extension Crypto {
         var r = a; for i in 0..<min(a.count, b.count) { r[i] ^= b[i] }; return r
     }
 
-    /// GF(2^128) multiply (GCM), big-endian bit order with reduction poly 0xe1.
-    private static func gmul(_ x: [UInt8], _ y: [UInt8]) -> [UInt8] {
-        var z = [UInt8](repeating: 0, count: 16)
-        var v = y
-        for i in 0..<128 {
-            if (x[i >> 3] >> (7 - (i & 7))) & 1 == 1 { z = xor(z, v) }
-            let lsb = v[15] & 1
-            // v >>= 1
-            for j in stride(from: 15, through: 1, by: -1) { v[j] = (v[j] >> 1) | ((v[j-1] & 1) << 7) }
-            v[0] >>= 1
-            if lsb == 1 { v[0] ^= 0xe1 }
-        }
-        return z
+    // MARK: GHASH over 64-bit halves (much faster than the byte-array version).
+
+    private static func loadBE64(_ b: [UInt8], _ o: Int) -> UInt64 {
+        var v: UInt64 = 0
+        for i in 0..<8 { v = (v << 8) | UInt64(o + i < b.count ? b[o + i] : 0) }
+        return v
     }
 
+    /// GF(2^128) multiply of two 128-bit values held as (hi, lo) big-endian halves.
+    private static func gmul128(_ xHi: UInt64, _ xLo: UInt64, _ yHi: UInt64, _ yLo: UInt64) -> (UInt64, UInt64) {
+        var zHi: UInt64 = 0, zLo: UInt64 = 0
+        var vHi = yHi, vLo = yLo
+        for i in 0..<128 {
+            let bit: UInt64 = i < 64 ? (xHi >> (63 - i)) & 1 : (xLo >> (127 - i)) & 1
+            if bit == 1 { zHi ^= vHi; zLo ^= vLo }
+            let lsb = vLo & 1
+            vLo = (vLo >> 1) | (vHi << 63)
+            vHi >>= 1
+            if lsb == 1 { vHi ^= 0xe100000000000000 }
+        }
+        return (zHi, zLo)
+    }
+
+    /// GHASH(H, data) with zero-padding of the final partial block.
     private static func ghash(_ h: [UInt8], _ data: [UInt8]) -> [UInt8] {
-        var y = [UInt8](repeating: 0, count: 16)
+        let hHi = loadBE64(h, 0), hLo = loadBE64(h, 8)
+        var yHi: UInt64 = 0, yLo: UInt64 = 0
         var i = 0
         while i < data.count {
-            var block = [UInt8](repeating: 0, count: 16)
-            let n = min(16, data.count - i)
-            for j in 0..<n { block[j] = data[i + j] }
-            y = gmul(xor(y, block), h)
+            yHi ^= loadBE64(data, i); yLo ^= loadBE64(data, i + 8)
+            (yHi, yLo) = gmul128(yHi, yLo, hHi, hLo)
             i += 16
         }
-        return y
+        var out = [UInt8](repeating: 0, count: 16)
+        for j in 0..<8 { out[j] = UInt8((yHi >> (56 - 8 * j)) & 0xff); out[8 + j] = UInt8((yLo >> (56 - 8 * j)) & 0xff) }
+        return out
+    }
+
+    /// AES-CTR keystream decrypt in one CommonCrypto call (big-endian 128-bit counter).
+    private static func ctrCrypt(key: Data, counter: [UInt8], data: [UInt8]) -> [UInt8] {
+        guard !data.isEmpty else { return [] }
+        var cryptor: CCCryptorRef?
+        let status = key.withUnsafeBytes { k in
+            counter.withUnsafeBufferPointer { iv in
+                CCCryptorCreateWithMode(CCOperation(kCCEncrypt), CCMode(kCCModeCTR), CCAlgorithm(kCCAlgorithmAES),
+                                        CCPadding(ccNoPadding), iv.baseAddress, k.baseAddress, key.count,
+                                        nil, 0, 0, CCModeOptions(kCCModeOptionCTR_BE), &cryptor)
+            }
+        }
+        guard status == kCCSuccess, let cryptor else { return [] }
+        defer { CCCryptorRelease(cryptor) }
+        var out = [UInt8](repeating: 0, count: data.count); var moved = 0
+        _ = data.withUnsafeBufferPointer { d in
+            CCCryptorUpdate(cryptor, d.baseAddress, data.count, &out, out.count, &moved)
+        }
+        return out
     }
 
     private static func inc32(_ block: inout [UInt8]) {
@@ -170,6 +200,13 @@ extension Crypto {
 
     private static func be64(_ v: UInt64) -> [UInt8] { (0..<8).map { UInt8((v >> (56 - 8 * $0)) & 0xff) } }
 
+    /// GCM's J0 pre-counter block for an arbitrary-length IV.
+    private static func computeJ0(h: [UInt8], ivb: [UInt8]) -> [UInt8] {
+        if ivb.count == 12 { return ivb + [0, 0, 0, 1] }
+        let padded = ivb + [UInt8](repeating: 0, count: (16 - ivb.count % 16) % 16)
+        return ghash(h, padded + be64(0) + be64(UInt64(ivb.count) * 8))
+    }
+
     /// AES-256-GCM decrypt with an arbitrary-length IV (Apple keychain items use a 16-byte zero IV).
     /// Returns nil if the authentication tag does not verify. Implemented in Swift because this SDK's
     /// CommonCrypto does not expose GCM.
@@ -178,26 +215,11 @@ extension Crypto {
         let h = aesEncryptBlock(key: key, [UInt8](repeating: 0, count: 16))
 
         // J0
-        var j0 = [UInt8](repeating: 0, count: 16)
-        if ivb.count == 12 {
-            for i in 0..<12 { j0[i] = ivb[i] }; j0[15] = 1
-        } else {
-            var s = ghash(h, ivb + [UInt8](repeating: 0, count: (16 - ivb.count % 16) % 16))
-            s = gmul(xor(s, be64(0) + be64(UInt64(ivb.count) * 8)), h)
-            j0 = s
-        }
+        let j0 = computeJ0(h: h, ivb: ivb)
 
-        // CTR decrypt (keystream from inc32(J0)…)
+        // CTR decrypt (keystream from inc32(J0)…) — one CommonCrypto call.
         var counter = j0; inc32(&counter)
-        var pt = [UInt8](repeating: 0, count: ct.count)
-        var off = 0
-        while off < ct.count {
-            let ks = aesEncryptBlock(key: key, counter)
-            let n = min(16, ct.count - off)
-            for j in 0..<n { pt[off + j] = ct[off + j] ^ ks[j] }
-            inc32(&counter)
-            off += 16
-        }
+        let pt = ctrCrypt(key: key, counter: counter, data: ct)
 
         // Auth tag: GHASH(H, AAD_pad || CT_pad || [aadBits][ctBits]) XOR E(K, J0)
         var g = aadb
@@ -222,13 +244,7 @@ extension Crypto {
     static func debugGCMTag(key: Data, iv: Data, ciphertext: Data, aad: Data = Data()) -> [UInt8] {
         let ct = [UInt8](ciphertext), ivb = [UInt8](iv), aadb = [UInt8](aad)
         let h = aesEncryptBlock(key: key, [UInt8](repeating: 0, count: 16))
-        var j0 = [UInt8](repeating: 0, count: 16)
-        if ivb.count == 12 { for i in 0..<12 { j0[i] = ivb[i] }; j0[15] = 1 }
-        else {
-            var s = ghash(h, ivb + [UInt8](repeating: 0, count: (16 - ivb.count % 16) % 16))
-            s = gmul(xor(s, be64(0) + be64(UInt64(ivb.count) * 8)), h)
-            j0 = s
-        }
+        let j0 = computeJ0(h: h, ivb: ivb)
         var g = aadb
         if g.count % 16 != 0 { g += [UInt8](repeating: 0, count: 16 - g.count % 16) }
         var ctPad = ct
@@ -241,16 +257,9 @@ extension Crypto {
     static func debugAESBlock(key: Data, _ block: Data) -> [UInt8] { aesEncryptBlock(key: key, [UInt8](block)) }
     /// GCM decrypt without tag verification (for debugging the keystream/counter path).
     static func debugGCMPlaintext(key: Data, iv: Data, ciphertext: Data) -> [UInt8] {
-        let ct = [UInt8](ciphertext), ivb = [UInt8](iv)
-        var j0 = [UInt8](repeating: 0, count: 16)
-        if ivb.count == 12 { for i in 0..<12 { j0[i] = ivb[i] }; j0[15] = 1 }
-        var counter = j0; inc32(&counter)
-        var pt = [UInt8](repeating: 0, count: ct.count); var off = 0
-        while off < ct.count {
-            let ks = aesEncryptBlock(key: key, counter); let n = min(16, ct.count - off)
-            for j in 0..<n { pt[off + j] = ct[off + j] ^ ks[j] }
-            inc32(&counter); off += 16
-        }
-        return pt
+        let ct = [UInt8](ciphertext)
+        let h = aesEncryptBlock(key: key, [UInt8](repeating: 0, count: 16))
+        var counter = computeJ0(h: h, ivb: [UInt8](iv)); inc32(&counter)
+        return ctrCrypt(key: key, counter: counter, data: ct)
     }
 }

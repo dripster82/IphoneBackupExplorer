@@ -41,17 +41,26 @@ enum KeychainStore {
         guard let plist = try? PropertyListSerialization.propertyList(from: data, options: [], format: nil) as? [String: Any] else {
             return []
         }
-        var items: [KeychainItem] = []
+        // Gather every (kind, blob) job first, then decrypt + parse them in parallel across cores —
+        // the per-item AES-GCM is CPU-bound and there can be a couple of thousand items.
+        var jobs: [(KeychainItem.Kind, Data)] = []
         for section in ["genp", "inet", "cert", "keys"] {
             guard let rows = plist[section] as? [[String: Any]],
                   let kind = KeychainItem.Kind(rawValue: section) else { continue }
-            for row in rows {
-                guard let blob = row["v_Data"] as? Data,
-                      let plain = decryptItem(blob, session: session) else { continue }
-                if let item = parseItem(plain, kind: kind) { items.append(item) }
+            for row in rows where row["v_Data"] is Data {
+                jobs.append((kind, row["v_Data"] as! Data))
             }
         }
-        return items
+        var results = [KeychainItem?](repeating: nil, count: jobs.count)
+        results.withUnsafeMutableBufferPointer { buf in
+            DispatchQueue.concurrentPerform(iterations: jobs.count) { i in
+                let (kind, blob) = jobs[i]
+                if let plain = decryptItem(blob, session: session) {
+                    buf[i] = parseItem(plain, kind: kind)
+                }
+            }
+        }
+        return results.compactMap { $0 }
     }
 
     /// Convenience: decode the keychain and present it as DataRecords for the generic data views.

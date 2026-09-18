@@ -488,7 +488,9 @@ final class AppModel: ObservableObject {
                 }.value
                 isLoadingData = false
                 guard workspace == .data(kind) else { return }
-                recordCache[kind] = recs; records = recs; selectedRecordID = recs.first?.id
+                recordCache[kind] = recs; records = recs
+                // Sections start collapsed; don't preselect a (possibly hidden) row.
+                selectedRecordID = nil
             }
             return
         }

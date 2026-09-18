@@ -3,7 +3,8 @@ import SwiftUI
 /// The Passwords (keychain) list, grouped into collapsible sections by credential type.
 struct KeychainListView: View {
     @EnvironmentObject var model: AppModel
-    @State private var collapsed: Set<String> = []
+    /// Sections start collapsed; the user expands the type they want.
+    @State private var collapsed: Set<String> = ["website", "wifi", "application", "system"]
 
     /// Section order + presentation.
     private static let groupInfo: [(key: String, title: String, icon: String)] = [
@@ -30,11 +31,17 @@ struct KeychainListView: View {
                                 ForEach(rows) { record in row(record) }
                             } header: {
                                 Label("\(info.title)  (\(rows.count))", systemImage: info.icon)
-                                    .font(.callout).foregroundStyle(.secondary)
+                                    .font(.callout.weight(.semibold))
+                                    .contentShape(Rectangle())
+                                    .onTapGesture {
+                                        if collapsed.contains(info.key) { collapsed.remove(info.key) }
+                                        else { collapsed.insert(info.key) }
+                                    }
                             }
                         }
                     }
                 }
+                .listStyle(.sidebar)
             }
         }
         .navigationTitle("Passwords")
@@ -54,6 +61,11 @@ struct KeychainListView: View {
         }
     }
 
+    private func expansion(_ key: String) -> Binding<Bool> {
+        Binding(get: { !collapsed.contains(key) },
+                set: { open in if open { collapsed.remove(key) } else { collapsed.insert(key) } })
+    }
+
     private func row(_ record: DataRecord) -> some View {
         VStack(alignment: .leading, spacing: 2) {
             Text(record.title).lineLimit(1)
@@ -63,11 +75,6 @@ struct KeychainListView: View {
         }
         .padding(.vertical, 1)
         .tag(record.id)
-    }
-
-    private func expansion(_ key: String) -> Binding<Bool> {
-        Binding(get: { !collapsed.contains(key) },
-                set: { open in if open { collapsed.remove(key) } else { collapsed.insert(key) } })
     }
 
     private var subtitle: String {
