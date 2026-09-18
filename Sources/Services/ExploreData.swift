@@ -23,7 +23,7 @@ struct DataRecord: Identifiable, Hashable {
 
 /// The kinds of parsed-data viewers beyond Files/Contacts/Messages.
 enum DataKind: String, CaseIterable, Identifiable, Hashable {
-    case calls, callsLegacy, safariHistory, safariBookmarks, notes, voicemails, calendar, reminders, photos, health, wifi, accounts, appPermissions
+    case calls, callsLegacy, safariHistory, safariBookmarks, notes, voicemails, calendar, reminders, photos, health, wifi, accounts, appPermissions, keychain
     var id: String { rawValue }
 
     var title: String {
@@ -40,6 +40,7 @@ enum DataKind: String, CaseIterable, Identifiable, Hashable {
         case .wifi: return "Wi-Fi Networks"
         case .accounts: return "Accounts"
         case .appPermissions: return "App Permissions"
+        case .keychain: return "Passwords"
         }
     }
     var icon: String {
@@ -56,6 +57,7 @@ enum DataKind: String, CaseIterable, Identifiable, Hashable {
         case .wifi: return "wifi"
         case .accounts: return "at"
         case .appPermissions: return "hand.raised"
+        case .keychain: return "key.fill"
         }
     }
     /// Whether to also load contacts, to resolve phone numbers to names.
@@ -77,6 +79,7 @@ enum DataKind: String, CaseIterable, Identifiable, Hashable {
         case .wifi: return "com.apple.wifi-networks.plist"
         case .accounts: return "Accounts/Accounts3.sqlite"
         case .appPermissions: return "TCC/TCC.db"
+        case .keychain: return "keychain-backup.plist"
         }
     }
 }
@@ -132,6 +135,7 @@ enum ExploreParser {
         case .photos:         return try photos(db)
         case .health:         return try health(db)
         case .wifi:           return []
+        case .keychain:       return []   // handled in AppModel (needs the backup session for decryption)
         case .accounts:       return try accounts(db)
         case .appPermissions: return try appPermissions(db)
         }

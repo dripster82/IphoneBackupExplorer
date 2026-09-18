@@ -132,6 +132,12 @@ final class BackupSession {
         return dest
     }
 
+    /// Unwrap a keychain item's per-item key using the backup keybag (encrypted backups only).
+    func keychainUnwrap(protectionClass: Int, wrappedKey: Data) -> Data? {
+        guard let keybag else { return nil }
+        return try? keybag.unwrapKey(protectionClass: protectionClass, wrappedKey: wrappedKey)
+    }
+
     func clearCache() {
         lock.lock(); materialised.removeAll(); lock.unlock()
         try? FileManager.default.removeItem(at: workDirectory.appendingPathComponent("preview"))

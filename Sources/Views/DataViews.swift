@@ -99,7 +99,15 @@ struct DataDetailView: View {
                             ForEach(record.fields, id: \.self) { f in
                                 GridRow {
                                     Text(f.label).foregroundStyle(.secondary).gridColumnAlignment(.trailing)
-                                    Text(f.value).textSelection(.enabled)
+                                    HStack(spacing: 6) {
+                                        Text(f.value).textSelection(.enabled)
+                                        Button {
+                                            NSPasteboard.general.clearContents()
+                                            NSPasteboard.general.setString(f.value, forType: .string)
+                                        } label: { Image(systemName: "doc.on.doc") }
+                                        .buttonStyle(.borderless).controlSize(.small).foregroundStyle(.secondary)
+                                        .help("Copy \(f.label)")
+                                    }
                                 }
                             }
                         }

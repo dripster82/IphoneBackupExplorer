@@ -359,6 +359,11 @@ final class AppModel: ObservableObject {
                 if !wifiFiles.isEmpty { kinds.append(kind) }
                 continue
             }
+            if kind == .keychain {
+                // Keychain items exist only in encrypted backups and need the session to decrypt.
+                if session != nil, dataFile(for: .keychain) != nil { kinds.append(kind) }
+                continue
+            }
             guard dataFile(for: kind) != nil else { continue }
             if kind == .callsLegacy && kinds.contains(.calls) { continue }
             kinds.append(kind)
@@ -444,6 +449,22 @@ final class AppModel: ObservableObject {
                 let recs = await Task.detached(priority: .userInitiated) { () -> [DataRecord] in
                     let urls = files.compactMap { try? session.materialise($0) }
                     return WiFiStore.networks(from: urls)
+                }.value
+                isLoadingData = false
+                guard workspace == .data(kind) else { return }
+                recordCache[kind] = recs; records = recs; selectedRecordID = recs.first?.id
+            }
+            return
+        }
+
+        // Keychain: decrypt keychain-backup.plist with the backup keybag (encrypted backups only).
+        if kind == .keychain {
+            guard let file = dataFile(for: .keychain) else { return }
+            isLoadingData = true; dataError = nil
+            Task {
+                let recs = await Task.detached(priority: .userInitiated) { () -> [DataRecord] in
+                    guard let data = try? session.contents(of: file) else { return [] }
+                    return KeychainStore.records(from: data, session: session)
                 }.value
                 isLoadingData = false
                 guard workspace == .data(kind) else { return }
