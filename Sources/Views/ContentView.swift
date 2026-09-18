@@ -18,6 +18,7 @@ struct ContentView: View {
                 case .messages: MessagesListView()
                 case .whatsapp: MessagesListView()
                 case .data(.photos): PhotosGalleryView()
+                case .data(.keychain): KeychainListView()
                 case .data(let kind): DataListView(kind: kind)
                 }
             }
