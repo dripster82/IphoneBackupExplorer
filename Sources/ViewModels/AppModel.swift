@@ -56,6 +56,9 @@ final class AppModel: ObservableObject {
     @Published var photoFavoritesOnly = false
     @Published var photoGPSOnly = false
 
+    // Keychain (Passwords) filtering
+    @Published var keychainShowSystem = false
+
     // Global search
     @Published var showGlobalSearch = false
     @Published var globalSearchText = ""
@@ -375,9 +378,26 @@ final class AppModel: ObservableObject {
     var filteredRecords: [DataRecord] {
         let q = dataSearch.trimmingCharacters(in: .whitespaces)
         var rows = q.isEmpty ? records : records.filter { $0.searchText.localizedCaseInsensitiveContains(q) }
-        if dataSortByName { rows.sort { $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending } }
+        // Keychain: hide Apple/system-internal items (tokens, sync material) unless asked to show them.
+        if workspace == .data(.keychain), !keychainShowSystem {
+            rows = rows.filter { $0.group != "system" }
+        }
+        if dataSortByName {
+            rows.sort { $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending }
+        } else if workspace == .data(.keychain) {
+            // Cluster the Passwords list by type (websites, Wi-Fi, apps, then anything else).
+            let order: [String: Int] = ["website": 0, "wifi": 1, "application": 2, "system": 3]
+            rows.sort {
+                let a = order[$0.group ?? ""] ?? 4, b = order[$1.group ?? ""] ?? 4
+                if a != b { return a < b }
+                return $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending
+            }
+        }
         return rows
     }
+
+    /// Count of hidden system keychain items (for the filter toggle label).
+    var keychainSystemCount: Int { records.filter { $0.group == "system" }.count }
     var selectedRecord: DataRecord? { records.first { $0.id == selectedRecordID } }
     /// Detail target: the (single) currently-selected record.
     var currentRecord: DataRecord? {

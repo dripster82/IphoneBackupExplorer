@@ -80,8 +80,15 @@ enum SelfTest {
                 guard let plist = try PropertyListSerialization.propertyList(from: data, options: [], format: nil) as? [String: Any] else { print("keychain not a plist (len \(data.count))"); exit(1) }
                 print("keychain sections: \(plist.keys.sorted())")
                 let kcRecords = KeychainStore.records(from: data, session: session)
-                print("=== KEYCHAIN DataRecords: \(kcRecords.count) (sample) ===")
-                for r in kcRecords.prefix(4) { print("  \(r.title) | \(r.subtitle) | fields=\(r.fields.map { $0.label })") }
+                let byGroup = Dictionary(grouping: kcRecords, by: { $0.group ?? "?" }).mapValues { $0.count }
+                print("=== KEYCHAIN DataRecords: \(kcRecords.count) — groups: \(byGroup) ===")
+                for g in ["website", "wifi", "application"] {
+                    print("  -- \(g) --")
+                    for r in kcRecords.filter({ $0.group == g }).prefix(6) {
+                        let pw = r.fields.first { $0.label == "Password" }?.value ?? "-"
+                        print("     \(r.title) | \(r.subtitle) | pw=\(pw.prefix(24))")
+                    }
+                }
                 let kcItems = KeychainStore.load(from: data, session: session)
                 print("=== DECODED KEYCHAIN ITEMS: \(kcItems.count) ===")
                 for it in kcItems.prefix(25) {

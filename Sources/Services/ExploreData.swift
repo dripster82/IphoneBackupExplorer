@@ -12,6 +12,8 @@ struct DataRecord: Identifiable, Hashable {
     /// relativePath (suffix) of an associated media file in the backup, if any (voicemail audio, photo).
     var mediaPathSuffix: String?
     var mediaDomain: String?
+    /// Optional classification used for filtering (e.g. keychain: "website" / "wifi" / "application" / "system").
+    var group: String? = nil
 
     struct Field: Hashable { let label: String; let value: String }
 

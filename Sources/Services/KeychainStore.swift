@@ -1,5 +1,10 @@
 import Foundation
 
+private extension String {
+    /// nil when the string is empty or whitespace-only, otherwise self.
+    var nilIfEmpty: String? { trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : self }
+}
+
 /// A decrypted keychain entry (a password, token, certificate reference, etc.).
 struct KeychainItem: Identifiable {
     let id = UUID()
@@ -52,50 +57,103 @@ enum KeychainStore {
     /// Convenience: decode the keychain and present it as DataRecords for the generic data views.
     /// Only items carrying a recoverable secret (password/token) or account are shown.
     static func records(from data: Data, session: BackupSession) -> [DataRecord] {
-        // Internal sync/bookkeeping attributes that add noise to the detail view.
-        let noise: Set<String> = ["Account", "Service", "Server", "Password", "Access Group", "Protocol",
-                                  "Created", "Modified", "sha1", "persistref", "UUID", "sync", "tomb",
-                                  "musr", "atyp", "agrp", "vwht", "tkid", "sync1", "pdmn", "Accessible"]
         return load(from: data, session: session).compactMap { item -> DataRecord? in
-            let hasSecret = item.secret != nil || item.secretData != nil
-            // Drop tombstones (deleted items) and empty non-secret entries — pure noise for the user.
-            if item.isTombstone && !hasSecret { return nil }
-            let title = item.account ?? item.service ?? item.label ?? "(keychain item)"
+            if item.isTombstone { return nil }
+            let group = classify(item)
+            let titleCandidates: [String?] = [item.account, item.service, item.label]
+            let title = titleCandidates.compactMap { $0?.nilIfEmpty }.first ?? "(keychain item)"
             var fields: [DataRecord.Field] = [.init(label: "Type", value: typeLabel(item))]
-            if let a = item.account, !a.isEmpty { fields.append(.init(label: "Account", value: a)) }
-            if let s = item.service, !s.isEmpty {
-                fields.append(.init(label: item.kind == .internetPassword ? "Server" : "Service", value: s))
+            if let a = item.account?.nilIfEmpty { fields.append(.init(label: "Account", value: a)) }
+            if let s = item.service?.nilIfEmpty {
+                fields.append(.init(label: item.kind == .internetPassword ? "Website" : "Service", value: s))
             }
-            if let secret = item.secret, !secret.isEmpty {
+            if let secret = item.secret?.nilIfEmpty {
                 fields.append(.init(label: "Password", value: secret))
             } else if let d = item.secretData {
                 fields.append(.init(label: "Password", value: "\(d.count) bytes (binary)"))
             }
-            if let g = item.accessGroup, !g.isEmpty { fields.append(.init(label: "Access Group", value: g)) }
-            if let p = item.proto, !p.isEmpty { fields.append(.init(label: "Protocol", value: p)) }
+            if let g = item.accessGroup?.nilIfEmpty { fields.append(.init(label: "App / Group", value: g)) }
+            if let l = item.label?.nilIfEmpty, l != title { fields.append(.init(label: "Label", value: l)) }
             if let d = item.created { fields.append(.init(label: "Created", value: ExploreParser.dateStr(d))) }
             if let d = item.modified { fields.append(.init(label: "Modified", value: ExploreParser.dateStr(d))) }
-            // Fold in any remaining meaningful attributes not already surfaced.
-            for (k, v) in item.attributes where !noise.contains(k) && !v.isEmpty && v != "0" {
-                if fields.contains(where: { $0.label == k }) { continue }
-                fields.append(.init(label: k, value: v))
-            }
-            let subtitle = [typeLabel(item), item.service].compactMap { $0 }.first(where: { !$0.isEmpty }) ?? ""
+            // Subtitle: the site/app this credential belongs to.
+            let subtitle = item.service?.nilIfEmpty ?? item.accessGroup?.nilIfEmpty ?? typeLabel(item)
             return DataRecord(id: item.id.uuidString,
-                              title: title,
-                              subtitle: hasSecret ? subtitle : "\(subtitle) · no stored secret",
+                              title: title, subtitle: subtitle,
                               date: item.modified ?? item.created,
-                              fields: fields, body: nil)
+                              fields: fields, body: nil, group: group)
         }
     }
 
+    /// Classify an item so system/Apple-internal noise can be hidden by default.
+    /// Returns "wifi", "website", "application" or "system".
+    static func classify(_ item: KeychainItem) -> String {
+        if item.service == "AirPort" { return item.secret?.nilIfEmpty != nil ? "wifi" : "system" }
+        let svc = (item.service ?? "").lowercased()
+        let acct = (item.account ?? "").lowercased()
+        let agrp = item.accessGroup ?? ""
+        let label = item.label ?? ""
+        // Protected Cloud Storage sync material — never a user credential.
+        if agrp == "com.apple.ProtectedCloudStorage" || label.hasPrefix("PCS ")
+            || item.proto == "ProtectedCloudStorage" { return "system" }
+        // Apple identity / authentication tokens and other OS-internal services.
+        let systemNeedles = ["appleidauthentication", "com.apple.gs.", ".idms.", "idms.", "grandslam",
+                             "heartbeat", "-token", ".token", "com.apple.account.", "com.apple.continuity",
+                             "bluetoothlesync", "com.apple.sbd", "cloudkit", "com.apple.security",
+                             "com.apple.private", "com.apple.aps", "com.apple.icloud"]
+        let grp = agrp.lowercased()
+        if systemNeedles.contains(where: { svc.contains($0) || acct.contains($0) || grp.contains($0) }) { return "system" }
+        // No recoverable text secret (binary key / sync blob) → not a user-facing password.
+        guard let secret = item.secret?.nilIfEmpty else { return "system" }
+        // Config blobs stored in place of a password (app A/B test JSON, plists, etc.).
+        if secret.hasPrefix("{") || secret.hasPrefix("[") || secret.hasPrefix("<?xml") || secret.hasPrefix("bplist") {
+            return "system"
+        }
+        // Token-expiry / oauth / SDK-internal bookkeeping items masquerading as passwords.
+        if svc.contains("oauth") || svc.contains("expiry") || svc.contains("-token")
+            || svc.contains("riskcomponent") || svc.contains("migration") || svc.contains("nanoregistry")
+            || isTimestamp(secret) { return "system" }
+        let account = item.account ?? ""
+        let server = item.service ?? ""
+        if item.kind == .internetPassword {
+            // Genuine Safari/website logins have a domain-like server or an email/username account.
+            // Apple's iCloud-Keychain sync services (Engram, Manatee, AutoUnlock, ApplePay, …) use a
+            // UUID account with a single-word service name — filter those out.
+            let looksDomain = server.contains(".") && server.rangeOfCharacter(from: .letters) != nil
+            let acctEmail = account.contains("@")
+            if looksDomain || acctEmail { return "website" }
+            return "system"
+        }
+        // Generic application password: drop Apple-internal, device-IDs, cookies and UUID-keyed entries.
+        let noiseNeedles = ["datr", "deviceid", "installationid", "clientcontext", "securefamily",
+                            "anonymousid", "advertisingid", "sessionid", "correlation"]
+        if server.lowercased().hasPrefix("com.apple.") || grp.hasPrefix("com.apple.")
+            || acct.hasPrefix("com.apple.") || isUUID(account) || isUUID(secret)
+            || noiseNeedles.contains(where: { svc.contains($0) || acct.contains($0) }) { return "system" }
+        return "application"
+    }
+
+    private static func isUUID(_ s: String) -> Bool {
+        s.count == 36 && UUID(uuidString: s) != nil
+    }
+
+    private static func isTimestamp(_ s: String) -> Bool {
+        // e.g. "840553246.516280" or "63113904000.000000" — a bare CFAbsoluteTime, not a password.
+        guard let dot = s.firstIndex(of: "."), Double(s) != nil else { return false }
+        return s.distance(from: s.startIndex, to: dot) >= 8
+    }
+
     private static func typeLabel(_ item: KeychainItem) -> String {
-        if item.service == "AirPort" { return "Wi-Fi Password" }
-        switch item.kind {
-        case .genericPassword: return "Password / Token"
-        case .internetPassword: return "Website Login"
-        case .certificate: return "Certificate"
-        case .key: return "Key"
+        switch classify(item) {
+        case "wifi": return "Wi-Fi Password"
+        case "website": return "Website Login"
+        case "application": return "App Password"
+        default:
+            switch item.kind {
+            case .certificate: return "Certificate"
+            case .key: return "Key"
+            default: return "System Item"
+            }
         }
     }
 

@@ -44,6 +44,10 @@ struct DataListView: View {
             ToolbarItemGroup {
                 Menu {
                     Toggle("Sort by name", isOn: $model.dataSortByName)
+                    if kind == .keychain {
+                        Divider()
+                        Toggle("Show system items (\(model.keychainSystemCount))", isOn: $model.keychainShowSystem)
+                    }
                 } label: { Label("Sort", systemImage: "arrow.up.arrow.down") }
                 Button { model.exportRecords(kind: kind) } label: { Label("Export", systemImage: "square.and.arrow.up") }
                     .disabled(model.records.isEmpty)
